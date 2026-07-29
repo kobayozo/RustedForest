@@ -25,6 +25,7 @@ export class EnemyAnimator {
     const prev = this.currentState ? this.actions[this.currentState] : null;
     if (!next) return;
 
+    next.timeScale = state === 'run' ? 1.75 : 1;
     next.reset().play();
     if (prev && prev !== next) {
       prev.crossFadeTo(next, FADE_TIME, true);

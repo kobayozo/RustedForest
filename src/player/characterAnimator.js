@@ -2,9 +2,8 @@ import * as THREE from 'three';
 import { CHARACTER_CLIPS } from './characterModel.js';
 
 const FADE_TIME = 0.2;
+const ATTACK_RESTART_FADE = 0.08;
 
-// ボディ側・装備側それぞれのミキサーで同じクリップをクロスフェード再生し、
-// 見た目上は1体のキャラクターとして同期して動かす
 export class CharacterAnimator {
   constructor(mixers, clips, swordRig = null) {
     this.mixers = mixers;
@@ -19,13 +18,12 @@ export class CharacterAnimator {
     });
     this.currentState = null;
     this.swordRig = swordRig;
-    this.swordLocation = 'sheath';
+    this.swordLocation = swordRig?.alwaysInHand ? 'hand' : 'sheath';
   }
 
-  // 剣を腰の鞘/右手のどちらに装着するか切り替える。走行中などの手首の激しい
-  // 動きに剣を追従させると不自然に見えるため、攻撃の瞬間だけ手に持たせる
   _equipSword(location) {
-    if (!this.swordRig || this.swordLocation === location) return;
+    if (!this.swordRig || this.swordRig.alwaysInHand) return;
+    if (this.swordLocation === location) return;
     const { sword, hipBone, handBone, sheathTransform, handTransform } = this.swordRig;
     if (location === 'hand' && handBone) {
       hipBone?.remove(sword);
@@ -46,14 +44,28 @@ export class CharacterAnimator {
     return this.clips[clipName]?.duration ?? 1;
   }
 
+  _isAttackState(state) {
+    return (
+      state === 'attack' ||
+      state === 'attack2' ||
+      state === 'attack3' ||
+      state === 'heavyAttack' ||
+      state === 'jumpAttack' ||
+      state === 'kick'
+    );
+  }
+
   setState(state) {
     if (state === this.currentState) return;
-    if (this.currentState === 'attack' && state !== 'attack') this._equipSword('sheath');
+    if (this._isAttackState(this.currentState) && !this._isAttackState(state)) {
+      this._equipSword('sheath');
+    }
     for (const actions of this.actionsByMixer) {
       const next = actions[state] ?? actions.idle;
       const prev = this.currentState ? actions[this.currentState] : null;
       if (!next) continue;
 
+      next.timeScale = state === 'idle' ? 0.45 : 1;
       next.reset().play();
       if (prev && prev !== next) {
         prev.crossFadeTo(next, FADE_TIME, true);
@@ -64,41 +76,76 @@ export class CharacterAnimator {
     this.currentState = state;
   }
 
-  // trigger系(attack/hit/dead)はsetState()の"同じstateなら何もしない"ガードを
-  // 迂回してforce-restartする必要がある(コンボの2撃目以降や、走行中の被弾など)。
-  // その際、直前まで再生していた他のアクション(例: run/walk)をfadeIn()だけでは
-  // 止められず、weight=1のまま裏で再生され続けて以後ずっとポーズに混ざり込む
-  // (=「攻撃/被弾後もずっと走り続けて見える」原因)。stop()で確実に止めてから
-  // 対象のアクションだけを再生する
-  _forceState(key, { timeScale = 1, fadeIn = 0.05, loopOnce = false } = {}) {
+  _forceState(key, { timeScale = 1, fadeIn = 0.05, loopOnce = false, softRestart = false } = {}) {
     for (const actions of this.actionsByMixer) {
       const action = actions[key];
       if (!action) continue;
-      for (const [otherKey, otherAction] of Object.entries(actions)) {
-        if (otherKey !== key) otherAction.stop();
-      }
+      const prev = this.currentState ? actions[this.currentState] : null;
+
       action.timeScale = timeScale;
       action.reset();
       if (loopOnce) {
         action.setLoop(THREE.LoopOnce, 1);
         action.clampWhenFinished = true;
+      } else {
+        action.setLoop(THREE.LoopRepeat, Infinity);
+        action.clampWhenFinished = false;
       }
       action.play();
-      action.fadeIn(fadeIn);
+
+      // 同じ攻撃クリップのコンボ接続: 短くクロスフェードしてつなぐ
+      if (softRestart && prev === action) {
+        action.fadeIn(fadeIn);
+      } else if (softRestart && prev && prev !== action) {
+        prev.crossFadeTo(action, fadeIn, false);
+      } else {
+        for (const [otherKey, otherAction] of Object.entries(actions)) {
+          if (otherKey !== key) otherAction.stop();
+        }
+        action.fadeIn(fadeIn);
+      }
     }
     this.currentState = key;
   }
 
-  // コンボの2撃目以降は「state=attack」のまま同じクリップを再度頭から
-  // 再生し直したいので、speedMultiplierで段ごとの勢いを変えられるようにする
-  triggerAttack(speedMultiplier = 1) {
+  // 1段目: attack / 2段目: attack2(しゃがみ) / 3段目: attack3(旧ジャンプ切り)
+  triggerAttack(speedMultiplier = 1, { comboStage = 0, comboContinue = false } = {}) {
     this._equipSword('hand');
-    this._forceState('attack', { timeScale: speedMultiplier });
+    const actions = this.actionsByMixer[0] || {};
+    let key = 'attack';
+    if (comboStage === 1 && actions.attack2) key = 'attack2';
+    else if (comboStage >= 2 && actions.attack3) key = 'attack3';
+    this._forceState(key, {
+      timeScale: speedMultiplier,
+      fadeIn: comboContinue ? ATTACK_RESTART_FADE : 0.06,
+      loopOnce: true,
+      softRestart: comboContinue,
+    });
+  }
+
+  triggerHeavyAttack(speedMultiplier = 1) {
+    this._equipSword('hand');
+    this._forceState('heavyAttack', { timeScale: speedMultiplier, loopOnce: true });
+  }
+
+  triggerJumpAttack(speedMultiplier = 1) {
+    this._equipSword('hand');
+    this._forceState('jumpAttack', { timeScale: speedMultiplier, loopOnce: true, fadeIn: 0.08 });
+  }
+
+  triggerKick(speedMultiplier = 1) {
+    this._equipSword('hand');
+    this._forceState('kick', { timeScale: speedMultiplier, loopOnce: true, fadeIn: 0.06 });
+  }
+
+  triggerRoll() {
+    this._equipSword('hand');
+    this._forceState('roll', { fadeIn: 0.05, loopOnce: true });
   }
 
   triggerHit() {
     this._equipSword('sheath');
-    this._forceState('hit');
+    this._forceState('hit', { fadeIn: 0.08, loopOnce: true });
   }
 
   triggerDeath() {

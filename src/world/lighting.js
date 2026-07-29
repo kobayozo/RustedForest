@@ -1,6 +1,7 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 
-export function createLighting(scene) {
+export function createLighting(scene, renderer) {
   scene.background = new THREE.Color(0x8fb8d8);
   scene.fog = new THREE.Fog(0x8fb8d8, 40, 130);
 
@@ -22,5 +23,14 @@ export function createLighting(scene) {
   const ambient = new THREE.AmbientLight(0xffffff, 0.25);
   scene.add(ambient);
 
-  return { hemi, sun, ambient };
+  // PBR金属(騎士アーマー等)が黒く潰れないよう、簡易室内環境を反射源にする
+  let environment = null;
+  if (renderer) {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    scene.environment = environment;
+    pmrem.dispose();
+  }
+
+  return { hemi, sun, ambient, environment };
 }

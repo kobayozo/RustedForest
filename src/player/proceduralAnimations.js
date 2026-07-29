@@ -1,15 +1,13 @@
 import * as THREE from 'three';
 
-// Solus Knightにはローリング(前転)専用のモーションが収録されていない。
-// Rig_Hipsが全身(脊椎・両脚)の実質的なルートボーンであることを確認済みなので、
-// これをローカルX軸周りに360°回転させることで簡易的な前転を表現する。
-// 実際の前転のように接地点が移動するわけではなく、腰の高さを中心に体が
-// 剛体的に回転するだけの簡略表現だが、モーション無しよりは大きく改善する
+// Mixamo剣盾パックにローリング専用が無いため、腰ボーンを前方回転させて前転を作る。
+// コントローラ側で visualModel 全体の回転も重ね、全身が転がって見えるようにする
 const ROLL_CLIP_NAME = 'PlayerRoll';
-const ROLL_KEYFRAME_STEPS = 8;
+const ROLL_KEYFRAME_STEPS = 16;
 
 export function createRollClip(hipsBone, duration) {
   const baseQuat = hipsBone.quaternion.clone();
+  // キャラ正面(+Z/-Z)へ前転するよう、腰のローカルX周りに360°
   const axis = new THREE.Vector3(1, 0, 0);
 
   const times = [];

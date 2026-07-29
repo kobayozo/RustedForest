@@ -18,7 +18,7 @@ const PATCH_OFFSET_Z = 271.9;
 
 // 城・池など「地形を平らにならしたい」場所の定義。座標はcastle.js/pond.js側の
 // 配置ロジックと共有する単一の情報源として、ここからimportして使う
-export const CASTLE_ANCHOR = { x: 18, z: -18, radius: 10, height: 1.4 };
+export const CASTLE_ANCHOR = { x: 18, z: -18, radius: 14, height: 1.4 };
 export const POND_ANCHOR = { x: -16, z: 14, radius: 7.5, height: -1.6 };
 const FLATTEN_ZONES = [CASTLE_ANCHOR, POND_ANCHOR];
 
