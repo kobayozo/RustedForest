@@ -22,9 +22,10 @@ import { EnemyAI } from './enemy/enemyAI.js';
 import { getHeightAt, CASTLE_ANCHOR } from './world/terrain.js';
 import { InputState } from './core/input.js';
 import { Engine } from './core/engine.js';
-import { createStaminaBar, createHealthBar, createEnemyHealthBar } from './ui/hud.js';
+import { createStaminaBar, createHealthBar, createEnemyHealthBar, createGameOverScreen } from './ui/hud.js';
 import { AudioManager } from './audio/audioManager.js';
 import { FootstepPlayer } from './audio/footsteps.js';
+import { HitFlash, spawnHitSpark, updateHitSparks } from './combat/hitEffects.js';
 
 const FOOTSTEP_SOUNDS = ['footstep0', 'footstep1', 'footstep2', 'footstep3', 'footstep4'];
 const SWORD_SWING_SOUNDS = ['swordSwing0', 'swordSwing1'];
@@ -37,12 +38,19 @@ const HIT_ENEMY_THUD_SOUNDS = ['hitEnemyThud0', 'hitEnemyThud1', 'hitEnemyThud2'
 const HIT_PLAYER_PUNCH_SOUNDS = ['hitPlayerPunch0', 'hitPlayerPunch1', 'hitPlayerPunch2'];
 const HIT_PLAYER_THUD_SOUNDS = ['hitPlayer0', 'hitPlayer1', 'hitPlayer2'];
 
-// プレイヤーの攻撃が敵に届いたかどうかの簡易判定(距離+前方コーン)。
-// 精密な武器ヒットボックスではなく、アクションゲームでよく使われる簡略化した近接判定
-const ATTACK_HIT_RANGE = 1.9;
-const ATTACK_HIT_ANGLE_COS = Math.cos(THREE.MathUtils.degToRad(45));
+// プレイヤーの攻撃が敵に届いたかどうかの判定。キャラ中心同士の距離ではなく、
+// 実際に振っている剣(攻撃中は手に装着される)の位置と、敵の胴体あたりの座標との
+// 距離で判定することで、剣や拳が実際に相手に届いているかに近い判定にする
+const WEAPON_HIT_RADIUS = 1.2;
+const ENEMY_HURTBOX_HEIGHT = 1.0; // 敵の足元位置から胴体中心までのオフセット
 const LIGHT_ATTACK_DAMAGE = 14;
 const HEAVY_ATTACK_DAMAGE = 32;
+const HIT_SPARK_HEIGHT = 1.0; // 胸あたりの高さで火花を散らす
+
+// 敵(衛兵18,-3 / 野盗9,-1)の索敵範囲(半径11、うろつき範囲6を含めた最大到達距離17)
+// より十分離れた、池(-16,14)にもかからない場所を初期位置にする
+const PLAYER_SPAWN = new THREE.Vector3(0, 0, 20);
+const GAME_OVER_DELAY = 1.6; // 死亡モーションを見せてからGAME OVERを出すまでの待ち時間
 
 async function main() {
   const canvas = document.getElementById('app');
@@ -72,11 +80,13 @@ async function main() {
   scene.add(forest);
   scene.add(pond.group);
 
-  const { root: characterRoot, mixers, clips } = character;
+  const { root: characterRoot, mixers, clips, swordRig } = character;
   scene.add(characterRoot);
-  const animator = new CharacterAnimator(mixers, clips);
+  const animator = new CharacterAnimator(mixers, clips, swordRig);
+  const playerHitFlash = new HitFlash(characterRoot);
 
   const controller = new PlayerController(characterRoot, animator);
+  controller.position.copy(PLAYER_SPAWN);
   const input = new InputState(canvas);
   // カメラの障害物回避は地形と城壁を対象にする(木・池は小さく気にならないため除外)
   const thirdPersonCamera = new ThirdPersonCamera(camera, [terrain, castle]);
@@ -87,7 +97,9 @@ async function main() {
     scene.add(meshScene);
     const mixer = createEnemyMixer(meshScene);
     const enemyAnimator = new EnemyAnimator(mixer, enemyClipLib, clipMap);
-    return new EnemyAI(meshScene, enemyAnimator, spawnPos);
+    const enemy = new EnemyAI(meshScene, enemyAnimator, spawnPos);
+    enemy.hitFlash = new HitFlash(meshScene);
+    return enemy;
   }
 
   // 剣を持つ警備兵は城の正門前に、素手の雑魚はその少し西側に配置する
@@ -115,6 +127,9 @@ async function main() {
   const staminaBar = createStaminaBar(hud);
   const healthBar = createHealthBar(hud);
   const enemyHealthBar = createEnemyHealthBar(hud);
+  const gameOverScreen = createGameOverScreen(hud);
+  let deathTimer = 0;
+  let gameOverShown = false;
 
   const audio = new AudioManager();
   audio.init();
@@ -147,24 +162,20 @@ async function main() {
   // 1つのattackTriggerIdにつき一度だけ命中判定を行うためのトラッキング
   let hitCheckedTriggerId = -1;
 
-  // 攻撃範囲内かつ前方コーン内にいる、最も近い生存中の敵1体だけを狙う
-  // (剣が複数の敵を同時になぎ払うことはない、という単純化した近接判定)
+  // 攻撃中は剣が手に装着されている(CharacterAnimatorの鞘/手の付け替え)ため、
+  // そのワールド座標を実際の武器位置として使い、敵の胴体中心との距離だけで判定する。
+  // キャラの向き(コーン判定)は不要になる— 剣が届いていなければ元々範囲外になるため
   function tryHitEnemy() {
+    const weaponPos = new THREE.Vector3();
+    swordRig.sword.getWorldPosition(weaponPos);
+
     let target = null;
     let bestDist = Infinity;
     for (const enemy of enemies) {
       if (!enemy.alive) continue;
-      const toEnemy = new THREE.Vector3().subVectors(enemy.position, controller.position);
-      toEnemy.y = 0;
-      const dist = toEnemy.length();
-      if (dist > ATTACK_HIT_RANGE) continue;
-      let facing = 1;
-      if (dist > 0.0001) {
-        const dir = toEnemy.clone().normalize();
-        const forward = new THREE.Vector3(-Math.sin(controller.yaw), 0, -Math.cos(controller.yaw));
-        facing = forward.dot(dir);
-      }
-      if (facing < ATTACK_HIT_ANGLE_COS) continue;
+      const enemyCenter = new THREE.Vector3(enemy.position.x, enemy.position.y + ENEMY_HURTBOX_HEIGHT, enemy.position.z);
+      const dist = weaponPos.distanceTo(enemyCenter);
+      if (dist > WEAPON_HIT_RADIUS) continue;
       if (dist < bestDist) {
         bestDist = dist;
         target = enemy;
@@ -173,8 +184,10 @@ async function main() {
     if (!target) return;
     const damage = controller.attackKind === 'heavy' ? HEAVY_ATTACK_DAMAGE : LIGHT_ATTACK_DAMAGE;
     target.takeDamage(damage);
-    audio.playRandom(HIT_ENEMY_CLANG_SOUNDS, { volume: 1.3, pitch: 0.85, pitchVariance: 0.08 });
-    audio.playRandom(HIT_ENEMY_THUD_SOUNDS, { volume: 1.1, pitch: 0.8, pitchVariance: 0.08 });
+    audio.playRandom(HIT_ENEMY_CLANG_SOUNDS, { volume: 0.9, pitch: 0.85, pitchVariance: 0.08 });
+    audio.playRandom(HIT_ENEMY_THUD_SOUNDS, { volume: 0.75, pitch: 0.8, pitchVariance: 0.08 });
+    target.hitFlash?.trigger();
+    spawnHitSpark(scene, new THREE.Vector3(target.position.x, target.position.y + HIT_SPARK_HEIGHT, target.position.z));
   }
 
   // HPバーに表示する敵は、生存中でプレイヤーに最も近い1体を毎フレーム選び直す
@@ -208,18 +221,46 @@ async function main() {
   };
 
   function update(dt) {
+    input.pollGamepad();
     const { dx, dy } = input.consumeMouseDelta();
     thirdPersonCamera.handleMouseDelta(dx, dy);
-    controller.update(dt, input, thirdPersonCamera.yaw);
+
+    // 死亡後は毎フレーム消費して、GAME OVER表示前の暴発を防ぐ(既存の
+    // ロール/攻撃入力と同じく「busy中も必ず消費する」方針に合わせる)
+    const respawnPressed = input.consumeJustPressed('KeyR');
+    if (gameOverShown) {
+      if (respawnPressed) {
+        controller.respawn(PLAYER_SPAWN);
+        gameOverScreen.hide();
+        gameOverShown = false;
+        deathTimer = 0;
+      }
+    } else {
+      controller.update(dt, input, thirdPersonCamera.yaw);
+      if (controller.action === 'dead') {
+        deathTimer += dt;
+        if (deathTimer >= GAME_OVER_DELAY) {
+          gameOverScreen.show();
+          gameOverShown = true;
+        }
+      } else {
+        deathTimer = 0;
+      }
+    }
     thirdPersonCamera.update(dt, controller.position);
     const hpBeforeEnemyTurn = controller.hp;
     for (const enemy of enemies) {
       enemy.update(dt, controller.position, (damage) => controller.takeDamage(damage));
     }
     if (controller.hp < hpBeforeEnemyTurn) {
-      audio.playRandom(HIT_PLAYER_PUNCH_SOUNDS, { volume: 1.3, pitch: 0.85, pitchVariance: 0.08 });
-      audio.playRandom(HIT_PLAYER_THUD_SOUNDS, { volume: 1.2, pitch: 0.75, pitchVariance: 0.08 });
+      audio.playRandom(HIT_PLAYER_PUNCH_SOUNDS, { volume: 0.9, pitch: 0.85, pitchVariance: 0.08 });
+      audio.playRandom(HIT_PLAYER_THUD_SOUNDS, { volume: 0.8, pitch: 0.75, pitchVariance: 0.08 });
+      playerHitFlash.trigger();
+      spawnHitSpark(scene, new THREE.Vector3(controller.position.x, controller.position.y + HIT_SPARK_HEIGHT, controller.position.z));
     }
+    playerHitFlash.update(dt);
+    for (const enemy of enemies) enemy.hitFlash?.update(dt);
+    updateHitSparks(dt);
     staminaBar.update(controller.stamina);
     healthBar.update(controller.hp);
     const displayEnemy = pickDisplayEnemy();

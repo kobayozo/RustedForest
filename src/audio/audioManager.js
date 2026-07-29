@@ -11,7 +11,7 @@ export class AudioManager {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     this.context = new Ctx();
     this.masterGain = this.context.createGain();
-    this.masterGain.gain.value = 0.7;
+    this.masterGain.gain.value = 0.6;
     this.masterGain.connect(this.context.destination);
 
     // ブラウザの自動再生制限のため、最初のクリックでcontextを再開する

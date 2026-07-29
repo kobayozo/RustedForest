@@ -1,5 +1,7 @@
-const WALK_STRIDE_HZ = 2.2;
-const RUN_STRIDE_HZ = 3.6;
+// Solus Knightの実クリップ長(knight_walk_in_place=1.29秒、
+// knight_run_heavy_weapon_in_place=0.96秒)を基準に、1ループ=左右2歩として算出
+const WALK_STRIDE_HZ = 2 / 1.293;
+const RUN_STRIDE_HZ = 2 / 0.958;
 
 // 正確な足の接地フレームは(外部glTFアニメーションのため)把握できないので、
 // 移動状態から歩幅相当の間隔を計算し、その周期で足音を鳴らす簡易実装

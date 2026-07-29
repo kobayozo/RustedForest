@@ -16,8 +16,10 @@ const ROLL_INVINCIBLE_START = 0.05;
 const ROLL_INVINCIBLE_END = 0.6;
 // クリップ全部を待つと後隙(硬直)が大きく次の行動に移りづらいため、
 // クリップ長の一定割合が経過した時点で操作を返す(イーズアウトのおかげで
-// 移動距離のほとんどは序盤で稼いでいるため、多少早く打ち切っても違和感は少ない)
-const ROLL_RECOVERY_CUT = 0.7;
+// 移動距離のほとんどは序盤で稼いでいるため、多少早く打ち切っても違和感は少ない)。
+// 自作の前転モーション(360°回転)をなるべく見せきりたいので、他のRECOVERY_CUTより
+// 高めの値にして回転の大部分が終わってから操作を返す
+const ROLL_RECOVERY_CUT = 0.85;
 const ATTACK_RECOVERY_CUT = 0.75;
 
 // 攻撃コンボ: 利用可能なクリップが"Sword_Attack"1種類しか無いため、段が進むごとに
@@ -300,6 +302,21 @@ export class PlayerController {
     this.speed = 0;
     this.invincible = false;
     this.animator.triggerDeath();
+  }
+
+  // GAME OVER画面からのリスポーン。HP/スタミナ/戦闘状態を全て初期値に戻し、
+  // 指定位置(省略時は現在地)へ再配置する。アニメーションは次のupdate()で
+  // action=null経由の通常フローに乗るため、ここではsetState()を呼ぶ必要はない
+  respawn(position) {
+    this.hp = PLAYER_MAX_HP;
+    this.stamina = STAMINA_MAX;
+    this.action = null;
+    this.state = 'idle';
+    this.speed = 0;
+    this.invincible = false;
+    this.comboStage = 0;
+    this.attackKind = null;
+    if (position) this.position.copy(position);
   }
 
   _syncRoot() {

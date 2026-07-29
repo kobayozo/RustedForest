@@ -20,8 +20,21 @@ const ATTACK_COOLDOWN = 1.5; // 攻撃後、次の攻撃までの待ち時間
 const ATTACK_IMPACT_T = 0.5; // クリップのこの割合が経過した時点で当たり判定を取る
 const HIT_STUN_DURATION = 0.55;
 
+// プレイヤー側と同様、キャラ中心同士ではなく実際の武器/拳(hand_rボーン)の位置と
+// プレイヤーの胴体中心との距離で命中判定する
+const WEAPON_HIT_RADIUS = 1.2;
+const PLAYER_HURTBOX_HEIGHT = 1.0;
+
 function randRange([min, max]) {
   return min + Math.random() * (max - min);
+}
+
+function findBone(root, name) {
+  let found = null;
+  root.traverse((obj) => {
+    if (!found && obj.isBone && obj.name === name) found = obj;
+  });
+  return found;
 }
 
 export const MODEL_YAW_OFFSET = Math.PI;
@@ -47,6 +60,7 @@ export class EnemyAI {
     this.action = null;
     this.attackCooldownTimer = 0;
     this._hitApplied = false;
+    this.handBone = findBone(root, 'hand_r');
   }
 
   update(dt, playerPosition, onPlayerHit) {
@@ -173,8 +187,12 @@ export class EnemyAI {
 
     if (!this._hitApplied && t >= ATTACK_IMPACT_T) {
       this._hitApplied = true;
-      const dist = this.position.distanceTo(playerPosition);
-      if (dist <= ATTACK_RANGE + 0.6) {
+      const weaponPos = this.handBone
+        ? this.handBone.getWorldPosition(new THREE.Vector3())
+        : this.position;
+      const playerCenter = new THREE.Vector3(playerPosition.x, playerPosition.y + PLAYER_HURTBOX_HEIGHT, playerPosition.z);
+      const dist = weaponPos.distanceTo(playerCenter);
+      if (dist <= WEAPON_HIT_RADIUS) {
         onPlayerHit(ATTACK_DAMAGE);
       }
     }

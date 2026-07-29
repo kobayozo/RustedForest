@@ -56,7 +56,8 @@ export async function loadEnemyMesh(armed) {
 
   if (armed) {
     const sword = createSword();
-    sword.rotation.set(-Math.PI / 4, 0, -Math.PI / 2);
+    // 実測し直し、回転なしで握りが手の中に自然に収まることを確認した
+    sword.rotation.set(0, 0, 0);
     sword.position.set(0, -0.03, 0.06);
     const handR = findBone(gltf.scene, 'hand_r');
     if (handR) handR.add(sword);

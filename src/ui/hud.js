@@ -124,3 +124,59 @@ export function createEnemyHealthBar(hud) {
     },
   };
 }
+
+// プレイヤー死亡時に表示するGAME OVERオーバーレイ。Rキーでのリスポーンを促す
+export function createGameOverScreen(hud) {
+  const overlay = document.createElement('div');
+  overlay.id = 'game-over-overlay';
+  Object.assign(overlay.style, {
+    position: 'absolute',
+    inset: '0',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'rgba(0, 0, 0, 0)',
+    opacity: '0',
+    pointerEvents: 'none',
+    transition: 'opacity 1.4s ease, background 1.4s ease',
+  });
+
+  const title = document.createElement('div');
+  title.textContent = 'YOU DIED';
+  Object.assign(title.style, {
+    color: '#8a1414',
+    fontFamily: 'serif',
+    fontSize: '64px',
+    letterSpacing: '12px',
+    textShadow: '0 0 24px rgba(0, 0, 0, 0.9)',
+    marginBottom: '28px',
+  });
+  overlay.appendChild(title);
+
+  const prompt = document.createElement('div');
+  prompt.textContent = 'Rキーでリスポーン';
+  Object.assign(prompt.style, {
+    color: '#e8d8b0',
+    fontFamily: 'serif',
+    fontSize: '20px',
+    letterSpacing: '4px',
+    textShadow: '0 1px 4px rgba(0, 0, 0, 0.9)',
+  });
+  overlay.appendChild(prompt);
+
+  hud.appendChild(overlay);
+
+  return {
+    show() {
+      overlay.style.background = 'rgba(0, 0, 0, 0.7)';
+      overlay.style.opacity = '1';
+      overlay.style.pointerEvents = 'auto';
+    },
+    hide() {
+      overlay.style.background = 'rgba(0, 0, 0, 0)';
+      overlay.style.opacity = '0';
+      overlay.style.pointerEvents = 'none';
+    },
+  };
+}

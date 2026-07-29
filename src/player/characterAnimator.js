@@ -6,7 +6,7 @@ const FADE_TIME = 0.2;
 // ボディ側・装備側それぞれのミキサーで同じクリップをクロスフェード再生し、
 // 見た目上は1体のキャラクターとして同期して動かす
 export class CharacterAnimator {
-  constructor(mixers, clips) {
+  constructor(mixers, clips, swordRig = null) {
     this.mixers = mixers;
     this.clips = clips;
     this.actionsByMixer = mixers.map((mixer) => {
@@ -18,6 +18,27 @@ export class CharacterAnimator {
       return actions;
     });
     this.currentState = null;
+    this.swordRig = swordRig;
+    this.swordLocation = 'sheath';
+  }
+
+  // 剣を腰の鞘/右手のどちらに装着するか切り替える。走行中などの手首の激しい
+  // 動きに剣を追従させると不自然に見えるため、攻撃の瞬間だけ手に持たせる
+  _equipSword(location) {
+    if (!this.swordRig || this.swordLocation === location) return;
+    const { sword, hipBone, handBone, sheathTransform, handTransform } = this.swordRig;
+    if (location === 'hand' && handBone) {
+      hipBone?.remove(sword);
+      handBone.add(sword);
+      sword.position.copy(handTransform.position);
+      sword.rotation.copy(handTransform.rotation);
+    } else if (hipBone) {
+      handBone?.remove(sword);
+      hipBone.add(sword);
+      sword.position.copy(sheathTransform.position);
+      sword.rotation.copy(sheathTransform.rotation);
+    }
+    this.swordLocation = location;
   }
 
   getClipDuration(state) {
@@ -27,6 +48,7 @@ export class CharacterAnimator {
 
   setState(state) {
     if (state === this.currentState) return;
+    if (this.currentState === 'attack' && state !== 'attack') this._equipSword('sheath');
     for (const actions of this.actionsByMixer) {
       const next = actions[state] ?? actions.idle;
       const prev = this.currentState ? actions[this.currentState] : null;
@@ -70,14 +92,17 @@ export class CharacterAnimator {
   // コンボの2撃目以降は「state=attack」のまま同じクリップを再度頭から
   // 再生し直したいので、speedMultiplierで段ごとの勢いを変えられるようにする
   triggerAttack(speedMultiplier = 1) {
+    this._equipSword('hand');
     this._forceState('attack', { timeScale: speedMultiplier });
   }
 
   triggerHit() {
+    this._equipSword('sheath');
     this._forceState('hit');
   }
 
   triggerDeath() {
+    this._equipSword('sheath');
     this._forceState('dead', { fadeIn: 0.15, loopOnce: true });
   }
 
