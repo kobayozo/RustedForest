@@ -64,23 +64,34 @@ export function createPlayerVitals(hud) {
     '92%',
   );
 
+  const flaskRow = document.createElement('div');
+  Object.assign(flaskRow.style, {
+    marginTop: '4px',
+    color: '#d4c4a0',
+    fontFamily: '"Palatino Linotype", Palatino, serif',
+    fontSize: '13px',
+    letterSpacing: '1px',
+    textShadow: '0 1px 3px rgba(0,0,0,0.9)',
+  });
+  flaskRow.textContent = '聖杯瓶 ×4';
+
   wrap.appendChild(hp.row);
   wrap.appendChild(stam.row);
+  wrap.appendChild(flaskRow);
   hud.appendChild(wrap);
 
   let ghostHp = PLAYER_HP_MAX;
 
   return {
-    update(currentHp, stamina) {
+    update(currentHp, stamina, flasks = 4, maxFlasks = 4) {
       const hpPct = (Math.max(0, currentHp) / PLAYER_HP_MAX) * 100;
       const stPct = (Math.max(0, stamina) / STAMINA_MAX) * 100;
       hp.fill.style.width = `${hpPct}%`;
       stam.fill.style.width = `${stPct}%`;
       stam.ghost.style.width = `${stPct}%`;
+      flaskRow.textContent = `聖杯瓶 ×${Math.max(0, flasks)}/${maxFlasks}  [C]`;
 
-      // HPが減ったときだけゴーストを遅れて追従させる
       if (currentHp < ghostHp - 0.01) {
-        // すぐには下げず、次フレーム以降の transition で追う
         requestAnimationFrame(() => {
           ghostHp = currentHp;
           hp.ghost.style.width = `${hpPct}%`;
@@ -148,15 +159,45 @@ export function createEnemyHealthBar(hud) {
   });
   bar.appendChild(fill);
   wrap.appendChild(bar);
+
+  const stanceBar = document.createElement('div');
+  Object.assign(stanceBar.style, {
+    width: '70%',
+    height: '4px',
+    margin: '5px auto 0',
+    background: 'rgba(8, 6, 4, 0.65)',
+    border: '1px solid rgba(180, 160, 100, 0.35)',
+    overflow: 'hidden',
+  });
+  const stanceFill = document.createElement('div');
+  Object.assign(stanceFill.style, {
+    width: '100%',
+    height: '100%',
+    background: 'linear-gradient(180deg, #e8d080, #a07820)',
+    transition: 'width 0.12s linear',
+  });
+  stanceBar.appendChild(stanceFill);
+  wrap.appendChild(stanceBar);
+
   hud.appendChild(wrap);
 
   return {
-    update(hp, visible, name, maxHp = ENEMY_HP_MAX) {
+    update(hp, visible, name, maxHp = ENEMY_HP_MAX, stance = null, maxStance = null) {
       wrap.style.opacity = visible ? '1' : '0';
       if (!visible) return;
       const cap = Math.max(1, maxHp || ENEMY_HP_MAX);
       fill.style.width = `${(Math.max(0, hp) / cap) * 100}%`;
       if (name) label.textContent = name;
+      if (maxStance != null && stance != null) {
+        stanceBar.style.display = 'block';
+        stanceFill.style.width = `${(Math.max(0, stance) / Math.max(1, maxStance)) * 100}%`;
+        stanceFill.style.background =
+          stance <= 0
+            ? 'linear-gradient(180deg, #fff2a0, #ffaa22)'
+            : 'linear-gradient(180deg, #e8d080, #a07820)';
+      } else {
+        stanceBar.style.display = 'none';
+      }
     },
   };
 }

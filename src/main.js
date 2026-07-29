@@ -41,6 +41,15 @@ import { FootstepPlayer } from './audio/footsteps.js';
 import { HitFlash, spawnHitSpark, updateHitSparks } from './combat/hitEffects.js';
 import { findLockTarget, getLockFocusPosition, shouldBreakLock } from './combat/lockOn.js';
 import { createPlayerCombatContext, syncPlayerCombatContext } from './enemy/soulsCombat.js';
+import {
+  HitStop,
+  stanceDamageForAttack,
+  initEnemyStance,
+  updateEnemyStance,
+  applyStanceDamage,
+  inHyperArmorWindow,
+  shareAggro,
+} from './combat/eldenSystems.js';
 
 const FOOTSTEP_SOUNDS = ['footstep0', 'footstep1', 'footstep2', 'footstep3', 'footstep4'];
 const HIT_PLAYER_PUNCH_SOUNDS = ['hitPlayerPunch0', 'hitPlayerPunch1', 'hitPlayerPunch2'];
@@ -70,6 +79,9 @@ const FINISHER_KNOCKBACK = 7.5;
 const HEAVY_KNOCKBACK = 9;
 const JUMP_KNOCKBACK = 8;
 const KICK_KNOCKBACK = 6.5;
+const CRITICAL_DAMAGE = 58;
+const HITSTOP_LIGHT = 0.045;
+const HITSTOP_HEAVY = 0.085;
 
 // 城(18,-18)から十分離れた初期位置
 const PLAYER_SPAWN = new THREE.Vector3(-28, 0, 42);
@@ -131,6 +143,7 @@ async function main() {
     const enemyAnimator = new EnemyAnimator(mixer, clipLib, clipMap);
     const enemy = new EnemyAI(meshScene, enemyAnimator, spawnPos);
     enemy.hitFlash = new HitFlash(meshScene);
+    initEnemyStance(enemy, 70);
     return enemy;
   }
 
@@ -140,6 +153,7 @@ async function main() {
     const enemyAnimator = new EnemyAnimator(mixer, mageClipLib, MAGE_CLIP_MAP);
     const enemy = new MageAI(meshScene, enemyAnimator, spawnPos, scene);
     enemy.hitFlash = new HitFlash(meshScene);
+    initEnemyStance(enemy, 55);
     return enemy;
   }
 
@@ -151,6 +165,7 @@ async function main() {
     enemy.hitFlash = new HitFlash(meshScene);
     enemy.hurtboxRadius = 2.4;
     enemy.hurtboxHeight = 2.2;
+    initEnemyStance(enemy, 160);
     return enemy;
   }
 
@@ -160,6 +175,7 @@ async function main() {
     const enemyAnimator = new EnemyAnimator(mixer, gwynClipLib, GWYN_CLIP_MAP);
     const enemy = new GwynAI(meshScene, enemyAnimator, spawnPos);
     enemy.hitFlash = new HitFlash(meshScene);
+    initEnemyStance(enemy, 120);
     return enemy;
   }
 
@@ -175,6 +191,7 @@ async function main() {
     const { path: _path, height: _h, ...aiOpts } = preset;
     const enemy = new AnimalAI(mesh, enemyAnimator, spawnPos, aiOpts);
     enemy.hitFlash = new HitFlash(mesh);
+    initEnemyStance(enemy, aiOpts.poiseMax ?? 40);
     return enemy;
   }
 
@@ -241,6 +258,7 @@ async function main() {
   let bossFelledReturnMusicAt = 0;
   const playerCombatCtx = createPlayerCombatContext();
   syncPlayerCombatContext(playerCombatCtx, controller, 0);
+  const hitStop = new HitStop();
 
   const audio = new AudioManager();
   audio.init();
@@ -322,6 +340,7 @@ async function main() {
 
   // 攻撃中は前腕→手首→刃先の2線分と敵胴体球の距離で判定する(振っている腕全体を使う)
   function attackDamageForKind(kind) {
+    if (kind === 'critical') return CRITICAL_DAMAGE;
     if (kind === 'heavy') return HEAVY_ATTACK_DAMAGE;
     if (kind === 'jump') return JUMP_ATTACK_DAMAGE;
     if (kind === 'kick') return KICK_DAMAGE;
@@ -331,20 +350,69 @@ async function main() {
   function buildHitOptions() {
     const kind = controller.attackKind;
     const forward = new THREE.Vector3(-Math.sin(controller.yaw), 0, -Math.cos(controller.yaw));
-    // 軽攻撃1〜2段: ダメージのみ(ノックバック・のけぞりなし)
     if (kind === 'light' && controller.comboStage < 2) {
-      return { stagger: false, knockback: null };
+      return { stagger: false, knockback: null, stanceDmg: stanceDamageForAttack(kind, controller.comboStage) };
     }
     let force = FINISHER_KNOCKBACK;
-    if (kind === 'heavy') force = HEAVY_KNOCKBACK;
+    if (kind === 'heavy' || kind === 'critical') force = HEAVY_KNOCKBACK;
     else if (kind === 'jump') force = JUMP_KNOCKBACK;
     else if (kind === 'kick') force = KICK_KNOCKBACK;
     else if (kind === 'light') force = FINISHER_KNOCKBACK;
     return {
       stagger: true,
-      forceStagger: kind === 'kick' || kind === 'jump' || kind === 'heavy',
+      forceStagger: kind === 'kick' || kind === 'jump' || kind === 'heavy' || kind === 'critical',
       knockback: forward.multiplyScalar(force),
+      stanceDmg: stanceDamageForAttack(kind, controller.comboStage),
     };
+  }
+
+  function applyDamageToEnemy(target, damage, opts) {
+    const stanceDmg = opts.stanceDmg ?? stanceDamageForAttack(controller.attackKind, controller.comboStage);
+    const broken = applyStanceDamage(target, stanceDmg, {
+      forceBreak: opts.forceStagger && controller.attackKind === 'kick',
+    });
+
+    let hitOpts = { ...opts };
+    if (target.action === 'attack' && !hitOpts.forceStagger) {
+      const elapsed = target.actionStartedAt
+        ? (performance.now() - target.actionStartedAt) / 1000
+        : 0;
+      const dur = target.attackDuration || 1;
+      const t = elapsed / dur;
+      if (inHyperArmorWindow(target, t)) {
+        hitOpts.stagger = false;
+      }
+    }
+    if (broken) {
+      hitOpts.forceStagger = true;
+      hitOpts.stagger = true;
+    }
+
+    const beforeHp = target.hp;
+    target.takeDamage(damage, hitOpts);
+    if (controller.attackKind === 'critical' || (broken && target.openForCritical === false)) {
+      target.openForCritical = false;
+    }
+    if (broken) {
+      target.openForCritical = true;
+      target.stanceBroken = true;
+      if (target.action !== 'dead') {
+        target.action = 'hit';
+        target.actionStartedAt = performance.now();
+        target.speed = 0;
+        target.animator?.trigger?.('hit');
+      }
+    }
+    shareAggro(enemies, target, controller.position);
+    if (target.hp < beforeHp) {
+      hitStop.trigger(
+        controller.attackKind === 'heavy' || controller.attackKind === 'critical'
+          ? HITSTOP_HEAVY
+          : HITSTOP_LIGHT,
+      );
+      return true;
+    }
+    return target.hp < beforeHp || broken;
   }
 
   function tryHitEnemy({ oncePerEnemy = false } = {}) {
@@ -372,12 +440,18 @@ async function main() {
     }
     if (!target) return false;
     if (oncePerEnemy) heavyHitEnemies.add(target);
-    const damage = attackDamageForKind(controller.attackKind);
-    target.takeDamage(damage, buildHitOptions());
+    let damage = attackDamageForKind(controller.attackKind);
+    if (controller.attackKind === 'critical' || target.openForCritical) {
+      damage = Math.max(damage, CRITICAL_DAMAGE);
+      target.openForCritical = false;
+      target.stanceBroken = false;
+      target.stance = 0;
+    }
+    applyDamageToEnemy(target, damage, buildHitOptions());
     audio.play('slashHit7', {
-      volume: controller.attackKind === 'heavy' ? 1.0 : 0.85,
+      volume: controller.attackKind === 'heavy' || controller.attackKind === 'critical' ? 1.0 : 0.85,
       pitch: controller.attackKind === 'heavy' ? 0.92 : 1,
-      pitchVariance: 0.04,
+      pitchVariance: 0.06,
     });
     target.hitFlash?.trigger();
     const sparkH = target.hurtboxHeight ?? HIT_SPARK_HEIGHT;
@@ -411,10 +485,11 @@ async function main() {
       }
     }
     if (!target) return false;
-    target.takeDamage(KICK_DAMAGE, {
+    applyDamageToEnemy(target, KICK_DAMAGE, {
       stagger: true,
       forceStagger: true,
       knockback: forward.clone().multiplyScalar(KICK_KNOCKBACK),
+      stanceDmg: stanceDamageForAttack('kick'),
     });
     audio.play('kickCloth1', { volume: 0.95, pitchVariance: 0.05 });
     target.hitFlash?.trigger();
@@ -429,7 +504,7 @@ async function main() {
     let bestDist = Infinity;
     for (const enemy of enemies) {
       if (!enemy.alive) continue;
-      if (enemy.state !== 'chase' && enemy.action !== 'attack') continue;
+      if (enemy.state !== 'chase' && enemy.action !== 'attack' && enemy.action !== 'windup' && !enemy.stanceBroken) continue;
       const dist = enemy.position.distanceTo(controller.position);
       if (dist < bestDist) {
         bestDist = dist;
@@ -518,7 +593,8 @@ async function main() {
   function update(rawDt) {
     // ボス撃破時はスローモーション
     if (bossFelledSlowmo > 0) bossFelledSlowmo -= rawDt;
-    const dt = bossFelledSlowmo > 0 ? rawDt * 0.28 : rawDt;
+    let dt = bossFelledSlowmo > 0 ? rawDt * 0.28 : rawDt;
+    dt = hitStop.scaleDt(dt);
 
     input.pollGamepad(dt);
     const { dx, dy } = input.consumeMouseDelta();
@@ -551,6 +627,7 @@ async function main() {
 
       const lockPos = lockTarget ? getLockFocusPosition(lockTarget, lockFocusPos) : null;
       thirdPersonCamera.setLockFocus(lockPos);
+      controller.criticalTarget = lockTarget;
       controller.update(dt, input, thirdPersonCamera.yaw, lockPos);
       if (controller.action === 'dead') {
         lockTarget = null;
@@ -568,7 +645,15 @@ async function main() {
     const hpBeforeEnemyTurn = controller.hp;
     syncPlayerCombatContext(playerCombatCtx, controller, dt);
     for (const enemy of enemies) {
-      enemy.update(dt, controller.position, (damage) => controller.takeDamage(damage), playerCombatCtx);
+      updateEnemyStance(enemy, dt);
+      // 回復中は敵が強く狙い、ロール狩りしやすくする
+      if (controller.healing) playerCombatCtx.staminaRatio = Math.min(playerCombatCtx.staminaRatio, 0.15);
+      enemy.update(
+        dt,
+        controller.position,
+        (damage) => controller.takeDamage(damage, enemy.position, { chipMult: 0.6 }),
+        playerCombatCtx,
+      );
     }
     // プレイヤーと敵が貫通しないよう体当たりで押し出す
     resolveBodyCollisions(controller, enemies);
@@ -586,13 +671,15 @@ async function main() {
     playerHitFlash.update(dt);
     for (const enemy of enemies) enemy.hitFlash?.update(dt);
     updateHitSparks(dt);
-    playerVitals.update(controller.hp, controller.stamina);
+    playerVitals.update(controller.hp, controller.stamina, controller.flasks, controller.maxFlasks);
     const displayEnemy = pickDisplayEnemy();
     enemyHealthBar.update(
       displayEnemy ? displayEnemy.hp : 0,
       !!displayEnemy,
       displayEnemy ? displayEnemy.name : null,
       displayEnemy ? displayEnemy.maxHp : undefined,
+      displayEnemy?.stance,
+      displayEnemy?.maxStance,
     );
 
     // 索敵中の敵でBGM分岐: ドラゴン戦闘=ボス曲、その他戦闘=FF風通常曲

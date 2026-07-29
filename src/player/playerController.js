@@ -63,9 +63,23 @@ const STAMINA_MAX = 100;
 const STAMINA_REGEN_RATE = 18;
 const STAMINA_REGEN_DELAY = 0.45;
 const SPRINT_STAMINA_RATE = 12;
+const GUARD_CHIP_MULT = 0.55; // 受けたダメージに対するスタミナ削り倍率
+const GUARD_BREAK_STUN = 1.15;
 
 const PLAYER_MAX_HP = 100;
-const HIT_STUN_DURATION = 0.65; // のけぞりモーションをしっかり見せる
+const HIT_STUN_DURATION = 0.65;
+const FLASK_HEAL = 45;
+const FLASK_MAX = 4;
+const FLASK_USE_TIME = 1.15;
+const BACKSTEP_DISTANCE = 2.4;
+const BACKSTEP_DURATION = 0.42;
+const BACKSTEP_STAMINA = 18;
+const BACKSTEP_IFRAMES_START = 0.05;
+const BACKSTEP_IFRAMES_END = 0.55;
+const INPUT_BUFFER_WINDOW = 0.22;
+const CRITICAL_RANGE = 2.1;
+const CRITICAL_DAMAGE = 55;
+const CRITICAL_STAMINA = 5;
 
 // モデルによっては正面がZ+/Z-どちらを向いているか異なるため、見た目確認の上で調整する
 export const MODEL_YAW_OFFSET = Math.PI;
@@ -115,7 +129,17 @@ export class PlayerController {
     this.maxHp = PLAYER_MAX_HP;
     this.blocking = false;
     this.lastHitWasBlocked = false;
+    this.lastHitWasGuardBreak = false;
+    this.lastHitWasDeadAngle = false;
     this.lockTargetPos = null;
+
+    this.flasks = FLASK_MAX;
+    this.maxFlasks = FLASK_MAX;
+    this.healing = false;
+    this._bufferedAction = null; // 'roll' | 'attack' | 'heavy' | null
+    this._bufferExpiresAt = 0;
+    this.guardBroken = false;
+    this._usingFlask = false;
 
     // B / Space: 短押しロール、長押しダッシュ判定用
     this._dodgeHeld = false;
@@ -128,62 +152,92 @@ export class PlayerController {
 
   update(dt, input, cameraYaw, lockTargetPos = null) {
     if (this.action === 'dead') {
-      // 死亡後は入力を一切受け付けず、死亡モーションの再生だけ続ける
       this.animator.update(dt);
       return;
     }
 
     this.lockTargetPos = lockTargetPos;
+    this.criticalTarget = this.criticalTarget ?? null;
 
-    // 行動中(ロール/攻撃)かどうかに関わらず毎フレーム消費する。busy中は判定に
-    // 使わず捨てることで、ロール中に押したSpace/クリックが行動終了の瞬間に
-    // 溜まっていた入力として突然発火する(連続入力時の予期せぬ暴発)のを防ぐ
     const attackPressed = input.consumeJustPressed('Mouse0');
     const heavyAttackPressed = input.consumeJustPressed('Mouse2');
-    const kickPressed = input.consumeJustPressed('KeyE'); // L2 / E: キック
-    // L1 / Q 長押しで盾構え。ロール・攻撃・被弾中は構えられない
+    const kickPressed = input.consumeJustPressed('KeyE');
+    const flaskPressed = input.consumeJustPressed('KeyC') || input.consumeJustPressed('Digit1');
     const wantGuard = input.isDown('KeyQ');
 
-    // B/Space のタップ/長押しをエルデンリング風に分岐
     this._updateDodgeSprintInput(dt, input);
+
+    // リカバリ中の入力バッファ
+    if (this.action === 'attack' || this.action === 'roll' || this.action === 'backstep') {
+      if (attackPressed) this._bufferInput('attack');
+      if (heavyAttackPressed) this._bufferInput('heavy');
+      if (this._rollRequested) {
+        this._bufferInput('roll');
+        this._rollRequested = false;
+      }
+    }
 
     if (this.action === 'roll') {
       this.blocking = false;
       this.sprinting = false;
       this._updateRoll(dt);
+    } else if (this.action === 'backstep') {
+      this.blocking = false;
+      this.sprinting = false;
+      this._updateBackstep(dt);
+    } else if (this.action === 'flask') {
+      this.blocking = false;
+      this.sprinting = false;
+      this._updateFlask();
     } else if (this.action === 'attack') {
       this.blocking = false;
       this.sprinting = false;
       this._updateAttack(dt, attackPressed);
-    } else if (this.action === 'hit') {
+    } else if (this.action === 'hit' || this.action === 'guardBreak') {
       this.blocking = false;
       this.sprinting = false;
       this._updateHit();
     } else {
-      this.blocking = wantGuard;
+      this.blocking = wantGuard && !this.guardBroken;
       this._updateMove(dt, input, cameraYaw);
 
-      if (this._consumeRollRequest() && this.stamina >= ROLL_STAMINA_COST) {
+      // バッファ消化
+      const buffered = this._consumeBuffer();
+      const wantRoll = buffered === 'roll' || this._consumeRollRequest();
+      const wantLight = buffered === 'attack' || attackPressed;
+      const wantHeavy = buffered === 'heavy' || heavyAttackPressed;
+
+      if (flaskPressed && this.flasks > 0 && this.hp < PLAYER_MAX_HP) {
+        this._startFlask();
+      } else if (wantRoll && this.stamina >= Math.min(ROLL_STAMINA_COST, BACKSTEP_STAMINA)) {
         this.blocking = false;
         this.sprinting = false;
-        this._startRoll(input, cameraYaw);
+        // ロック中＋無方向入力 = バックステップ
+        const f = (input.isDown('KeyW') ? 1 : 0) - (input.isDown('KeyS') ? 1 : 0);
+        const s = (input.isDown('KeyD') ? 1 : 0) - (input.isDown('KeyA') ? 1 : 0);
+        if (this.lockTargetPos && f === 0 && s === 0 && this.stamina >= BACKSTEP_STAMINA) {
+          this._startBackstep();
+        } else if (this.stamina >= ROLL_STAMINA_COST) {
+          this._startRoll(input, cameraYaw);
+        }
       } else if (!this.blocking && kickPressed && this.stamina >= KICK_STAMINA_COST) {
         this.comboStage = 0;
         this._comboQueuedNext = false;
         this.stamina = Math.max(0, this.stamina - KICK_STAMINA_COST);
         this.staminaRegenTimer = STAMINA_REGEN_DELAY;
         this._startAttack('kick');
-      } else if (!this.blocking && heavyAttackPressed && this.stamina >= HEAVY_ATTACK_STAMINA_COST) {
+      } else if (!this.blocking && wantHeavy && this.stamina >= HEAVY_ATTACK_STAMINA_COST) {
         this.comboStage = 0;
         this._comboQueuedNext = false;
         this.stamina = Math.max(0, this.stamina - HEAVY_ATTACK_STAMINA_COST);
         this.staminaRegenTimer = STAMINA_REGEN_DELAY;
         this._startAttack('heavy');
-      } else if (!this.blocking && attackPressed) {
+      } else if (!this.blocking && wantLight) {
         this.comboStage = 0;
         this._comboQueuedNext = false;
-        // ダッシュ中の攻撃はジャンプ切り
-        if (this.sprinting && this.stamina >= JUMP_ATTACK_STAMINA_COST) {
+        if (this.criticalTarget?.openForCritical && this.tryCritical(this.criticalTarget)) {
+          // 姿勢破壊クリティカル
+        } else if (this.sprinting && this.stamina >= JUMP_ATTACK_STAMINA_COST) {
           this.stamina = Math.max(0, this.stamina - JUMP_ATTACK_STAMINA_COST);
           this.staminaRegenTimer = STAMINA_REGEN_DELAY;
           this._startAttack('jump');
@@ -193,20 +247,45 @@ export class PlayerController {
       }
     }
 
+    if (this.guardBroken && this.action !== 'guardBreak' && this.action !== 'hit') {
+      this.guardBroken = false;
+    }
+
     this._updateStamina(dt);
     this.position.y = this._groundY() + this.groundYBias;
     const resolved = resolveCircleColliders(this.position.x, this.position.z, BODY_RADIUS);
     this.position.x = resolved.x;
     this.position.z = resolved.z;
 
-    // ロールは triggerRoll() で LoopOnce 再生済み。ここでもう一度 setState すると
-    // フェードや reset が掛かる可能性があるので、専用アクション中はステート更新を飛ばす
-    if (this.action !== 'roll' && this.action !== 'attack' && this.action !== 'hit' && this.action !== 'dead') {
+    if (
+      this.action !== 'roll' &&
+      this.action !== 'backstep' &&
+      this.action !== 'attack' &&
+      this.action !== 'hit' &&
+      this.action !== 'guardBreak' &&
+      this.action !== 'flask' &&
+      this.action !== 'dead'
+    ) {
       this.animator.setState(this.state);
     }
     this.animator.update(dt);
-
     this._syncRoot();
+  }
+
+  _bufferInput(kind) {
+    this._bufferedAction = kind;
+    this._bufferExpiresAt = performance.now() + INPUT_BUFFER_WINDOW * 1000;
+  }
+
+  _consumeBuffer() {
+    if (!this._bufferedAction) return null;
+    if (performance.now() > this._bufferExpiresAt) {
+      this._bufferedAction = null;
+      return null;
+    }
+    const k = this._bufferedAction;
+    this._bufferedAction = null;
+    return k;
   }
 
   _updateDodgeSprintInput(_dt, input) {
@@ -237,9 +316,12 @@ export class PlayerController {
       this._sprintArmed = false;
     }
 
-    // busy中に溜まったロール要求は捨てる
-    if (this.action === 'roll' || this.action === 'attack' || this.action === 'hit') {
-      this._rollRequested = false;
+    // busy中はロール要求をバッファへ回す（捨てない）
+    if (this.action === 'roll' || this.action === 'attack' || this.action === 'hit' || this.action === 'backstep') {
+      if (this._rollRequested) {
+        this._bufferInput('roll');
+        this._rollRequested = false;
+      }
       this._dodgeRollPending = false;
     }
   }
@@ -346,6 +428,70 @@ export class PlayerController {
     }
   }
 
+  _startBackstep() {
+    const back = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    this.rollDir.copy(back);
+    this.action = 'backstep';
+    this.actionTimer = 0;
+    this.actionStartedAt = performance.now();
+    this.state = 'roll';
+    this.animator.triggerRoll();
+    this.stamina = Math.max(0, this.stamina - BACKSTEP_STAMINA);
+    this.staminaRegenTimer = STAMINA_REGEN_DELAY;
+  }
+
+  _updateBackstep(dt) {
+    this.actionTimer = (performance.now() - this.actionStartedAt) / 1000;
+    const t = Math.min(this.actionTimer / BACKSTEP_DURATION, 1);
+    this.invincible = t >= BACKSTEP_IFRAMES_START && t <= BACKSTEP_IFRAMES_END;
+    const speedFactor = 2 * (1 - t);
+    this.position.addScaledVector(
+      this.rollDir,
+      (BACKSTEP_DISTANCE / BACKSTEP_DURATION) * speedFactor * dt,
+    );
+    if (t >= 0.85) {
+      this.action = null;
+      this.invincible = false;
+      this.state = 'idle';
+    }
+  }
+
+  _startFlask() {
+    this.action = 'flask';
+    this.actionStartedAt = performance.now();
+    this.healing = true;
+    this._usingFlask = true;
+    this.speed = 0;
+    this.flasks = Math.max(0, this.flasks - 1);
+    this.animator.setState('idle');
+  }
+
+  _updateFlask() {
+    const t = (performance.now() - this.actionStartedAt) / 1000;
+    // 使用中はほぼ無防備（エルデンリングの回復隙）
+    if (t >= FLASK_USE_TIME * 0.45 && this._usingFlask) {
+      this.hp = Math.min(PLAYER_MAX_HP, this.hp + FLASK_HEAL);
+      this._usingFlask = false;
+    }
+    if (t >= FLASK_USE_TIME) {
+      this.action = null;
+      this.healing = false;
+    }
+  }
+
+  /** 姿勢破壊された敵へのクリティカル */
+  tryCritical(target) {
+    if (!target?.openForCritical || !target.alive) return false;
+    if (this.action) return false;
+    const dist = this.position.distanceTo(target.position);
+    if (dist > CRITICAL_RANGE) return false;
+    this.stamina = Math.max(0, this.stamina - CRITICAL_STAMINA);
+    this.staminaRegenTimer = STAMINA_REGEN_DELAY;
+    this.comboStage = 0;
+    this._startAttack('critical');
+    return true;
+  }
+
   _startAttack(kind) {
     this.action = 'attack';
     this.attackKind = kind;
@@ -355,7 +501,6 @@ export class PlayerController {
     this.speed = 0;
     this.attackTriggerId += 1;
 
-    // ロック中は攻撃開始時にターゲットへ正対する
     if (this.lockTargetPos) {
       const dx = this.lockTargetPos.x - this.position.x;
       const dz = this.lockTargetPos.z - this.position.z;
@@ -364,33 +509,45 @@ export class PlayerController {
       }
     }
 
+    if (kind === 'critical') {
+      this.attackDuration = this.baseHeavyAttackDuration / 1.35;
+      this.animator.triggerHeavyAttack(1.35);
+      return;
+    }
     if (kind === 'heavy') {
       this.attackDuration = this.baseHeavyAttackDuration / HEAVY_ATTACK_SPEED_MULT;
       this.animator.triggerHeavyAttack(HEAVY_ATTACK_SPEED_MULT);
-    } else if (kind === 'jump') {
+      return;
+    }
+    if (kind === 'jump') {
       this.attackDuration = this.baseJumpAttackDuration / JUMP_ATTACK_SPEED_MULT;
       this.animator.triggerJumpAttack(JUMP_ATTACK_SPEED_MULT);
-    } else if (kind === 'kick') {
+      return;
+    }
+    if (kind === 'kick') {
       this.attackDuration = this.baseKickDuration / KICK_SPEED_MULT;
       this.animator.triggerKick(KICK_SPEED_MULT);
-    } else {
-      // 1段: 一連目 / 2段: しゃがみ切り / 3段: 回転斬り(出始め高速)
-      const isFinisher = this.comboStage >= 2;
-      const speedMultiplier = isFinisher
-        ? ATTACK3_SPEED_MULT
-        : 1 + this.comboStage * ATTACK_COMBO_SPEED_STEP;
-      const baseDur =
-        this.comboStage >= 2
-          ? this.baseAttack3Duration
-          : this.comboStage === 1
-            ? this.baseAttack2Duration
-            : this.baseAttackDuration;
-      this.attackDuration = baseDur / speedMultiplier;
-      this.animator.triggerAttack(speedMultiplier, {
-        comboStage: this.comboStage,
-        comboContinue: this.comboStage > 0,
-      });
+      return;
     }
+
+    const stage = this.comboStage;
+    const speedMultiplier = 1 + stage * ATTACK_COMBO_SPEED_STEP;
+    let baseDur = this.baseAttackDuration;
+    if (stage === 1) baseDur = this.baseAttack2Duration;
+    else if (stage >= 2) {
+      baseDur = this.baseAttack3Duration;
+      this.attackDuration = baseDur / ATTACK3_SPEED_MULT;
+      this.animator.triggerAttack(ATTACK3_SPEED_MULT, {
+        comboStage: stage,
+        comboContinue: true,
+      });
+      return;
+    }
+    this.attackDuration = baseDur / speedMultiplier;
+    this.animator.triggerAttack(speedMultiplier, {
+      comboStage: stage,
+      comboContinue: stage > 0,
+    });
   }
 
   _updateAttack(dt, attackPressed) {
@@ -442,6 +599,15 @@ export class PlayerController {
       return;
     }
 
+    if (this.attackKind === 'critical') {
+      if (t >= HEAVY_ATTACK_RECOVERY_CUT) {
+        this.action = null;
+        this.attackKind = null;
+        this._comboQueuedNext = false;
+      }
+      return;
+    }
+
     // 軽攻撃コンボ
     const isFinisher = this.comboStage >= 2;
     const windowStart = isFinisher ? ATTACK3_COMBO_WINDOW_START : ATTACK_COMBO_WINDOW_START;
@@ -483,23 +649,62 @@ export class PlayerController {
     }
   }
 
-  // ロール中の無敵時間はここで一括判定する。既に死亡している場合は何もしない。
-  // 攻撃モーション中(振り始めていた場合)はダメージは受けつつもよろけで中断しない
-  // (=攻撃側にハイパーアーマーを持たせる)。これが無いと近接では敵の攻撃周期の方が
-  // 短く、プレイヤーが常に振り始める前にのけぞらされて一撃も入らなくなってしまう
-  takeDamage(amount) {
+  // attackerPos を渡すとデッドアングル判定できる。options: { chipMult, unblockable }
+  takeDamage(amount, attackerPos = null, options = {}) {
     if (this.action === 'dead' || this.invincible) return;
-    const blocked = this.blocking;
-    this.lastHitWasBlocked = blocked;
-    const dealt = blocked ? amount * GUARD_DAMAGE_MULT : amount;
-    this.hp = Math.max(0, this.hp - dealt);
-    if (this.hp <= 0) {
-      this._startDeath();
-    } else if (blocked) {
-      // 盾で受けたときはよろけない(スタミナも構えでは削らない)
-    } else if (this.action !== 'attack') {
-      this._startHit();
+    this.lastHitWasGuardBreak = false;
+    this.lastHitWasDeadAngle = false;
+
+    let blocked = this.blocking && !options.unblockable;
+    if (blocked && attackerPos) {
+      const toAtkX = attackerPos.x - this.position.x;
+      const toAtkZ = attackerPos.z - this.position.z;
+      const len = Math.hypot(toAtkX, toAtkZ) || 1;
+      const fx = -Math.sin(this.yaw);
+      const fz = -Math.cos(this.yaw);
+      const dot = (fx * toAtkX + fz * toAtkZ) / len;
+      if (dot < 0.15) {
+        blocked = false;
+        this.lastHitWasDeadAngle = true;
+      }
     }
+
+    this.lastHitWasBlocked = blocked;
+    if (blocked) {
+      const chip = amount * (options.chipMult ?? GUARD_CHIP_MULT);
+      this.stamina = Math.max(0, this.stamina - chip);
+      this.staminaRegenTimer = STAMINA_REGEN_DELAY;
+      const dealt = amount * GUARD_DAMAGE_MULT;
+      this.hp = Math.max(0, this.hp - dealt);
+      if (this.stamina <= 0.5) {
+        this.guardBroken = true;
+        this.lastHitWasGuardBreak = true;
+        this.blocking = false;
+        this.stamina = 0;
+        this._startGuardBreak();
+      }
+    } else {
+      this.hp = Math.max(0, this.hp - amount);
+      if (this.action === 'flask' || this.healing) {
+        // 回復隙は必ずよろける
+        this.healing = false;
+        this._usingFlask = false;
+        if (this.hp > 0) this._startHit();
+      } else if (this.action !== 'attack' && this.hp > 0) {
+        this._startHit();
+      }
+    }
+
+    if (this.hp <= 0) this._startDeath();
+  }
+
+  _startGuardBreak() {
+    this.action = 'guardBreak';
+    this.actionTimer = 0;
+    this.actionStartedAt = performance.now();
+    this.state = 'hit';
+    this.speed = 0;
+    this.animator.triggerHit();
   }
 
   _startHit() {
@@ -514,9 +719,13 @@ export class PlayerController {
 
   _updateHit() {
     this.actionTimer = (performance.now() - this.actionStartedAt) / 1000;
-    const stun = Math.max(HIT_STUN_DURATION, this.baseHitDuration * 0.75);
+    const stun =
+      this.action === 'guardBreak'
+        ? GUARD_BREAK_STUN
+        : Math.max(HIT_STUN_DURATION, this.baseHitDuration * 0.75);
     if (this.actionTimer >= stun) {
       this.action = null;
+      this.guardBroken = false;
     }
   }
 
@@ -528,17 +737,17 @@ export class PlayerController {
     this.animator.triggerDeath();
   }
 
-  // GAME OVER画面からのリスポーン。HP/スタミナ/戦闘状態を全て初期値に戻し、
-  // 指定位置(省略時は現在地)へ再配置する。アニメーションは次のupdate()で
-  // action=null経由の通常フローに乗るため、ここではsetState()を呼ぶ必要はない
   respawn(position) {
     this.hp = PLAYER_MAX_HP;
     this.stamina = STAMINA_MAX;
+    this.flasks = FLASK_MAX;
     this.action = null;
     this.state = 'idle';
     this.speed = 0;
     this.invincible = false;
     this.blocking = false;
+    this.healing = false;
+    this.guardBroken = false;
     this.comboStage = 0;
     this.attackKind = null;
     if (position) this.position.copy(position);

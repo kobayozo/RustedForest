@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { damp, dampAngle, clamp } from '../utils/math.js';
 
 const DISTANCE = 3.6;
-const LOCK_DISTANCE = 4.0;
+const LOCK_DISTANCE = 4.2;
 const SHOULDER_OFFSET = 0.5;
 const HEIGHT_OFFSET = 1.05;
 const PIVOT_HEIGHT = 1.4;
@@ -10,8 +10,8 @@ const MOUSE_SENSITIVITY = 0.0025;
 const MIN_PITCH = -0.6;
 const MAX_PITCH = 0.4;
 const FOLLOW_LAMBDA = 14;
-const LOCK_YAW_LAMBDA = 10;
-const LOCK_PITCH_LAMBDA = 8;
+const LOCK_YAW_LAMBDA = 12;
+const LOCK_PITCH_LAMBDA = 9;
 const MIN_CAMERA_DISTANCE = 0.5;
 const COLLISION_MARGIN = 0.3;
 

@@ -44,7 +44,9 @@ export function syncPlayerCombatContext(ctx, controller, dt) {
   ctx.staminaRatio = ctx.stamina / 100;
   ctx.attacking = ctx.action === 'attack';
   ctx.rolling = ctx.action === 'roll';
-  ctx.hitStun = ctx.action === 'hit';
+  ctx.hitStun = ctx.action === 'hit' || ctx.action === 'guardBreak';
+  ctx.healing = !!controller.healing;
+  ctx.guardBroken = !!controller.guardBroken;
 
   if (ctx.prevAction === 'roll' && ctx.action !== 'roll') ctx.rollEndedAgo = 0;
   else ctx.rollEndedAgo += dt;
@@ -330,6 +332,17 @@ export class SoulsMeleeBrain {
       playerCtx.attackEndedAgo < cfg.punishWindow &&
       dist <= cfg.attackRange * 1.2 &&
       Math.random() < cfg.punishChance * 0.1
+    ) {
+      this.queuedAttack = 'punish';
+      this.patience = 0;
+      return;
+    }
+
+    // 回復隙・ガード崩れを狙い撃ち
+    if (
+      (playerCtx.healing || playerCtx.guardBroken) &&
+      dist <= cfg.attackRange * 1.4 &&
+      Math.random() < 0.15
     ) {
       this.queuedAttack = 'punish';
       this.patience = 0;

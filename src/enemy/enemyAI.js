@@ -205,7 +205,6 @@ export class EnemyAI {
   _updateWindup(dt, playerPosition, playerCtx) {
     const ctx = playerCtx || { position: playerPosition };
     const elapsed = this._profile.windup - this._windupTimer;
-    // 予備動作中はプレイヤーを追尾、ロック後は向き固定
     if (elapsed < this._profile.trackUntil) {
       this.yaw = dampAngle(
         this.yaw,
@@ -216,6 +215,15 @@ export class EnemyAI {
       const d = new THREE.Vector3().subVectors(ctx.position || playerPosition, this.position);
       d.y = 0;
       if (d.lengthSq() > 1e-4) this._lungeDir.copy(d.normalize());
+    }
+    // フェイント: 溜め途中で稀にキャンセルして回り込みへ
+    if (elapsed > 0.12 && this._windupTimer > 0.1 && Math.random() < 0.012) {
+      this.action = null;
+      this.brain.hyperArmor = false;
+      this.brain.mode = 'reposition';
+      this.brain.modeTimer = 0.5 + Math.random() * 0.4;
+      this.brain.patience = 0.2;
+      return;
     }
     this._windupTimer -= dt;
     if (this._windupTimer <= 0) this._startAttackSwing();
@@ -228,6 +236,7 @@ export class EnemyAI {
     this.attackDuration = base / this._profile.timeScale;
     this._hitApplied = false;
     this._hitLanded = false;
+    this._hitCount = 0;
     this._lungeBudget = this._profile.lunge;
     this.animator.trigger('attack');
     const a = this.animator.actions.attack;
@@ -238,7 +247,6 @@ export class EnemyAI {
     const t = (performance.now() - this.actionStartedAt) / 1000 / this.attackDuration;
     const ctx = playerCtx || { position: playerPosition };
 
-    // 出始めのみ微追尾
     if (t < 0.15) {
       this.yaw = dampAngle(
         this.yaw,
@@ -254,9 +262,11 @@ export class EnemyAI {
       this._lungeBudget -= step;
     }
 
+    // 多段ヒット: 着弾窓で最大2ヒット
+    const maxHits = this._attackKind === 'combo' ? 2 : 1;
     if (
-      !this._hitApplied &&
-      t >= this._profile.impactT &&
+      this._hitCount < maxHits &&
+      t >= this._profile.impactT + this._hitCount * 0.18 &&
       t <= this._profile.impactEnd
     ) {
       const weaponPos = this.handBone
@@ -268,9 +278,10 @@ export class EnemyAI {
         playerPosition.z,
       );
       if (weaponPos.distanceTo(playerCenter) <= WEAPON_HIT_RADIUS) {
+        this._hitCount += 1;
         this._hitApplied = true;
         this._hitLanded = true;
-        onPlayerHit?.(ATTACK_DAMAGE * this._profile.damageMult);
+        onPlayerHit?.(ATTACK_DAMAGE * this._profile.damageMult * (this._hitCount === 1 ? 1 : 0.65));
       }
     }
 
@@ -279,7 +290,6 @@ export class EnemyAI {
       if (a) a.timeScale = 1;
       this.action = null;
       this.brain.endAttack(this._hitLanded);
-      // コンボ即時接続
       if (this.brain.queuedAttack === 'combo') {
         this._startWindup('combo', playerPosition, ctx);
       }
