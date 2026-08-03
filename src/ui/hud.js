@@ -89,7 +89,7 @@ export function createPlayerVitals(hud) {
       hp.fill.style.width = `${hpPct}%`;
       stam.fill.style.width = `${stPct}%`;
       stam.ghost.style.width = `${stPct}%`;
-      flaskRow.textContent = `聖杯瓶 ×${Math.max(0, flasks)}/${maxFlasks}  [C]`;
+      flaskRow.textContent = `聖杯瓶 ×${Math.max(0, flasks)}/${maxFlasks}  [Y]`;
 
       if (currentHp < ghostHp - 0.01) {
         requestAnimationFrame(() => {

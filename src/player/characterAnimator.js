@@ -133,6 +133,29 @@ export class CharacterAnimator {
     this._forceState('jumpAttack', { timeScale: speedMultiplier, loopOnce: true, fadeIn: 0.08 });
   }
 
+  triggerFlask(speedMultiplier = 0.9) {
+    this._equipSword('sheath');
+    if (this.swordRig?.flask) this.swordRig.flask.visible = true;
+    if (this.swordRig?.sword) this.swordRig.sword.visible = false;
+    // 掲げる所まで(地面に立てる前で切った flask クリップ)を再生し、最終ポーズで保持
+    this._forceState('flask', { timeScale: speedMultiplier, loopOnce: true, fadeIn: 0.1 });
+  }
+
+  endFlask() {
+    if (this.swordRig?.flask) this.swordRig.flask.visible = false;
+    if (this.swordRig?.sword) this.swordRig.sword.visible = true;
+    this._equipSword('hand');
+    this.setFlaskTilt(0);
+  }
+
+  /** 飲む動作の演出用に瓶を傾ける(専用モーションが無いためコードで簡易的に補う) */
+  setFlaskTilt(angle) {
+    const flask = this.swordRig?.flask;
+    const rest = this.swordRig?.flaskRestRotation;
+    if (!flask || !rest) return;
+    flask.rotation.set(rest.x + angle, rest.y, rest.z);
+  }
+
   triggerKick(speedMultiplier = 1) {
     this._equipSword('hand');
     this._forceState('kick', { timeScale: speedMultiplier, loopOnce: true, fadeIn: 0.06 });

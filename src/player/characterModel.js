@@ -23,6 +23,7 @@ export const CHARACTER_CLIPS = {
   dead: 'knight_dead',
   guardIdle: 'knight_guard_idle',
   guardWalk: 'knight_guard_walk',
+  flask: 'knight_flask',
 };
 
 const TARGET_HEIGHT = 1.85;
@@ -50,10 +51,12 @@ const ANIM_PATHS = {
   knight_attack3: `${MODEL_BASE}/anims/attack3.fbx`,
   // Mixamo: sword and shield attack (3)
   knight_heavy_attack: `${MODEL_BASE}/anims/heavy_attack.fbx`,
-  // Mixamo: sword and shield attack (2) — 前方へ跳び込んで振り下ろすジャンプ切り
+  // Mixamo: sword and shield attack (4) — ダッシュジャンプ切り
   knight_jump_attack: `${MODEL_BASE}/anims/jump_attack.fbx`,
   // Mixamo: kick — L2キック
   knight_kick: `${MODEL_BASE}/anims/kick.fbx`,
+  // Mixamo: casting — 聖杯瓶を飲む動作
+  knight_flask: `${MODEL_BASE}/anims/flask.fbx`,
   // Mixamo: impact (2) — のけぞり
   knight_hit: `${MODEL_BASE}/anims/hit.fbx`,
   // Mixamo: death (2) — 前方へ倒れ込み
@@ -229,6 +232,10 @@ function stripRootMotion(clip) {
   }
 }
 
+// flask.fbx は後半(約1.3s〜)で腰を落として地面に瓶を立てる。
+// 掲げる〜口元へ運ぶ冒頭だけ使い、その手前で切る。
+const FLASK_RAISE_END_SEC = 1.15;
+
 async function loadNamedClips(loader) {
   const clips = {};
   await Promise.all(
@@ -236,9 +243,18 @@ async function loadNamedClips(loader) {
       const fbx = await loader.loadAsync(url);
       const src = fbx.animations.find((c) => c.tracks.length > 0) || fbx.animations[0];
       if (!src) return;
-      const clip = src.clone();
+      let clip = src.clone();
       clip.name = clipName;
       stripRootMotion(clip);
+      if (clipName === 'knight_flask') {
+        clip = THREE.AnimationUtils.subclip(
+          clip,
+          clipName,
+          0,
+          Math.round(FLASK_RAISE_END_SEC * 30),
+          30,
+        );
+      }
       clips[clipName] = clip;
     })
   );
@@ -295,6 +311,43 @@ async function loadDownloadSword(modelScale) {
   group.name = 'sword';
   group.add(source);
   return group;
+}
+
+/** 聖杯瓶（エストゥス風）。飲むモーション中だけ右手に表示する */
+function createFlaskProp(modelScale) {
+  const g = new THREE.Group();
+  g.name = 'flask';
+  const s = 1 / Math.max(modelScale, 1e-6);
+  const glass = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.035 * s, 0.045 * s, 0.14 * s, 10),
+    new THREE.MeshStandardMaterial({
+      color: 0xc45a18,
+      emissive: 0xff6a20,
+      emissiveIntensity: 0.55,
+      metalness: 0.15,
+      roughness: 0.35,
+      transparent: true,
+      opacity: 0.92,
+    }),
+  );
+  glass.position.y = 0.07 * s;
+  g.add(glass);
+  const neck = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.018 * s, 0.028 * s, 0.05 * s, 8),
+    new THREE.MeshStandardMaterial({ color: 0x8a4a20, metalness: 0.2, roughness: 0.5 }),
+  );
+  neck.position.y = 0.16 * s;
+  g.add(neck);
+  const cork = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.022 * s, 0.022 * s, 0.025 * s, 8),
+    new THREE.MeshStandardMaterial({ color: 0x5c3a1a, roughness: 0.9 }),
+  );
+  cork.position.y = 0.2 * s;
+  g.add(cork);
+  const glow = new THREE.PointLight(0xff7722, 0.65, 1.2, 2);
+  glow.position.y = 0.08 * s;
+  g.add(glow);
+  return g;
 }
 
 async function loadDownloadShield(modelScale) {
@@ -412,9 +465,24 @@ export async function loadCharacterModel() {
     leftForearmBone.add(shield);
   }
 
+  // 聖杯瓶（飲むときだけ表示）。剣と同じ「柄=+Y」系の持ち方に合わせて
+  // handTransformと同じ位置・回転を使うことで、正しく直立した状態で握らせる
+  // (以前は position が modelScale を掛け違えていてほぼ原点にめり込み、
+  // 回転も剣と無関係な値だったため逆さ・横向きに持っているように見えていた)
+  const flask = createFlaskProp(modelScale);
+  flask.visible = false;
+  if (handBone) {
+    flask.position.copy(handTransform.position);
+    flask.rotation.copy(handTransform.rotation);
+    handBone.add(flask);
+  }
+  const flaskRestRotation = flask.rotation.clone();
+
   const swordRig = {
     sword,
     shield,
+    flask,
+    flaskRestRotation,
     hipBone,
     handBone,
     rightForearmBone, // 攻撃当たり判定で前腕ボーン位置を使うため

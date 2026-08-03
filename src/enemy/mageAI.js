@@ -5,27 +5,33 @@ import { damp, dampAngle } from '../utils/math.js';
 const DETECT_RADIUS = 16;
 const LOSE_RADIUS = 26;
 const WANDER_RADIUS = 8;
-const ATTACK_RANGE = 12; // この距離以内なら撃てる
-const PREFERRED_RANGE = 9; // この距離を保つ
-const FLEE_RANGE = 5.5; // これより近いと歩いて逃げる
+const ATTACK_RANGE = 12;
+const PREFERRED_RANGE = 9;
+const FLEE_RANGE = 5.5;
 
 const WALK_SPEED = 1.5;
-const CHASE_SPEED = 1.9; // 近づくときも歩き
-const FLEE_SPEED = 2.1; // 歩いて逃げる
+const CHASE_SPEED = 1.9;
+const FLEE_SPEED = 2.1;
 const TURN_LAMBDA = 9;
 const ACCEL_LAMBDA = 9;
 const IDLE_PAUSE_RANGE = [1.5, 3.5];
 
-const ENEMY_MAX_HP = 90;
+const ENEMY_MAX_HP = 95;
 const ATTACK_DAMAGE = 14;
-const ATTACK_COOLDOWN = 1.8;
-const ATTACK_IMPACT_T = 0.4;
+const CAST_DAMAGE = 20;
+const AREA_DAMAGE = 18;
+const ATTACK_COOLDOWN = 1.05;
+const ATTACK_IMPACT_T = 0.42;
+const CAST_IMPACT_T = 0.55;
+const AREA_IMPACT_T = 0.58;
+const ATTACK_RECOVER_TIME = 0.15;
 const HIT_STUN_DURATION = 0.55;
 const BODY_RADIUS = 0.4;
 
 const BOLT_SPEED = 14;
 const BOLT_RADIUS = 0.28;
 const BOLT_LIFE = 2.2;
+const AREA_RADIUS = 2.6;
 const PLAYER_HURTBOX_HEIGHT = 1.0;
 
 // 青玉は毎発射で Geometry / Material / PointLight を作るとヒッチるので共有・プールする
@@ -74,7 +80,8 @@ function randRange([min, max]) {
 
 export const MODEL_YAW_OFFSET = Math.PI;
 
-// Quaternius Wizard 向け遠距離AI。Shoot_OneHanded のタイミングで光弾を飛ばす
+// Ritual Woman + Pro Magic Pack 向け遠距離AI。
+// 片手魔法弾 / 両手詠唱弾 / 範囲魔法をモーションに合わせて切り替える
 export class MageAI {
   constructor(root, animator, homePosition, scene) {
     this.root = root;
@@ -92,10 +99,11 @@ export class MageAI {
     this.hp = ENEMY_MAX_HP;
     this.maxHp = ENEMY_MAX_HP;
     this.alive = true;
-    this.name = '魔法使い';
+    this.name = '儀式の魔女';
     this.bodyRadius = BODY_RADIUS;
 
     this.action = null;
+    this.attackType = 'attack';
     this.attackCooldownTimer = 0;
     this._boltFired = false;
     this.bolts = [];
@@ -133,6 +141,8 @@ export class MageAI {
 
     if (this.action === 'attack') {
       this._updateAttack(dt, playerPosition);
+    } else if (this.action === 'recover') {
+      this._updateRecover();
     } else if (this.action === 'hit') {
       this._updateHit();
     } else {
@@ -266,9 +276,18 @@ export class MageAI {
   }
 
   _startAttack(playerPosition) {
+    // 距離で技を選ぶ: 近距離=範囲、中距離=片手弾、遠め=両手詠唱
+    const dist = this.position.distanceTo(playerPosition);
+    let type = 'attack';
+    if (dist < FLEE_RANGE + 0.8) type = 'areaAttack';
+    else if (dist > PREFERRED_RANGE + 1.2 && Math.random() < 0.55) type = 'cast';
+    else if (Math.random() < 0.35) type = 'attack2';
+
     this.action = 'attack';
+    this.attackType = type;
     this.actionStartedAt = performance.now();
-    this.attackDuration = this.animator.getClipDuration('attack');
+    this.attackDuration = this.animator.getClipDuration(type === 'attack' ? 'attack' : type);
+    if (this.attackDuration < 0.2) this.attackDuration = this.animator.getClipDuration('attack');
     this._boltFired = false;
     this.speed = 0;
     if (!this._aimPos) this._aimPos = new THREE.Vector3();
@@ -280,27 +299,46 @@ export class MageAI {
       dir.normalize();
       this.yaw = Math.atan2(-dir.x, -dir.z);
     }
-    this.animator.trigger('attack');
+    const animKey =
+      type === 'areaAttack' ? 'areaAttack' : type === 'cast' ? 'cast' : type === 'attack2' ? 'attack2' : 'attack';
+    this.animator.trigger(animKey);
   }
 
   _updateAttack(dt, playerPosition) {
     const t = (performance.now() - this.actionStartedAt) / 1000 / this.attackDuration;
     if (playerPosition) this._aimPos.copy(playerPosition);
 
-    if (!this._boltFired && t >= ATTACK_IMPACT_T) {
+    const impact =
+      this.attackType === 'areaAttack'
+        ? AREA_IMPACT_T
+        : this.attackType === 'cast'
+          ? CAST_IMPACT_T
+          : ATTACK_IMPACT_T;
+
+    if (!this._boltFired && t >= impact) {
       this._boltFired = true;
-      this._spawnBolt(this._aimPos || playerPosition);
+      if (this.attackType === 'areaAttack') this._spawnArea(this._aimPos || playerPosition);
+      else this._spawnBolt(this._aimPos || playerPosition, this.attackType === 'cast' ? CAST_DAMAGE : ATTACK_DAMAGE);
     }
 
     if (t >= 1) {
-      this.action = null;
+      this.action = 'recover';
+      this.actionStartedAt = performance.now();
       this.attackCooldownTimer = ATTACK_COOLDOWN;
+      this.speed = 0;
+      this.animator.setState('idle');
     }
   }
 
-  _spawnBolt(targetPos) {
+  _updateRecover() {
+    const t = (performance.now() - this.actionStartedAt) / 1000;
+    this.speed = 0;
+    if (t >= ATTACK_RECOVER_TIME) this.action = null;
+  }
+
+  _spawnBolt(targetPos, damage = ATTACK_DAMAGE) {
     if (!this.scene || !targetPos) return;
-    _tmpOrigin.set(this.position.x, this.position.y + 1.2, this.position.z);
+    _tmpOrigin.set(this.position.x, this.position.y + 1.25, this.position.z);
     _tmpTarget.set(targetPos.x, targetPos.y + PLAYER_HURTBOX_HEIGHT, targetPos.z);
     _tmpDir.subVectors(_tmpTarget, _tmpOrigin);
     if (_tmpDir.lengthSq() < 1e-6) return;
@@ -312,9 +350,31 @@ export class MageAI {
 
     this.bolts.push({
       mesh,
-      velocity: _tmpDir.clone().multiplyScalar(BOLT_SPEED),
+      velocity: _tmpDir.clone().multiplyScalar(BOLT_SPEED * (damage > ATTACK_DAMAGE ? 1.15 : 1)),
       life: BOLT_LIFE,
       hit: false,
+      damage,
+      kind: 'bolt',
+    });
+  }
+
+  _spawnArea(targetPos) {
+    if (!this.scene || !targetPos) return;
+    // プレイヤー足元に魔法陣風の遅延爆発
+    const mesh = acquireBoltMesh();
+    mesh.scale.setScalar(3.2);
+    mesh.position.set(targetPos.x, targetPos.y + 0.15, targetPos.z);
+    this.scene.add(mesh);
+    this.bolts.push({
+      mesh,
+      velocity: new THREE.Vector3(0, 0, 0),
+      life: 0.85,
+      hit: false,
+      damage: AREA_DAMAGE,
+      kind: 'area',
+      center: new THREE.Vector3(targetPos.x, targetPos.y, targetPos.z),
+      armedAt: 0.35,
+      age: 0,
     });
   }
 
@@ -322,22 +382,36 @@ export class MageAI {
     for (let i = this.bolts.length - 1; i >= 0; i--) {
       const bolt = this.bolts[i];
       bolt.life -= dt;
-      bolt.mesh.position.addScaledVector(bolt.velocity, dt);
-
-      if (!bolt.hit && playerPosition) {
-        _tmpPlayerCenter.set(
-          playerPosition.x,
-          playerPosition.y + PLAYER_HURTBOX_HEIGHT,
-          playerPosition.z,
-        );
-        if (bolt.mesh.position.distanceTo(_tmpPlayerCenter) <= BOLT_RADIUS + 0.45) {
-          bolt.hit = true;
-          onPlayerHit?.(ATTACK_DAMAGE);
-          bolt.life = 0;
+      if (bolt.kind === 'area') {
+        bolt.age = (bolt.age || 0) + dt;
+        const pulse = 2.5 + Math.sin(bolt.age * 14) * 0.35;
+        bolt.mesh.scale.setScalar(pulse);
+        if (!bolt.hit && bolt.age >= (bolt.armedAt || 0.35) && playerPosition) {
+          const dx = playerPosition.x - bolt.center.x;
+          const dz = playerPosition.z - bolt.center.z;
+          if (dx * dx + dz * dz <= AREA_RADIUS * AREA_RADIUS) {
+            bolt.hit = true;
+            onPlayerHit?.(bolt.damage);
+          }
+        }
+      } else {
+        bolt.mesh.position.addScaledVector(bolt.velocity, dt);
+        if (!bolt.hit && playerPosition) {
+          _tmpPlayerCenter.set(
+            playerPosition.x,
+            playerPosition.y + PLAYER_HURTBOX_HEIGHT,
+            playerPosition.z,
+          );
+          if (bolt.mesh.position.distanceTo(_tmpPlayerCenter) <= BOLT_RADIUS + 0.45) {
+            bolt.hit = true;
+            onPlayerHit?.(bolt.damage ?? ATTACK_DAMAGE);
+            bolt.life = 0;
+          }
         }
       }
 
       if (bolt.life <= 0) {
+        bolt.mesh.scale.setScalar(1);
         releaseBoltMesh(bolt.mesh);
         this.bolts.splice(i, 1);
       }

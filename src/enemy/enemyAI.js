@@ -17,8 +17,10 @@ const IDLE_PAUSE_RANGE = [1.5, 3.5];
 const ENEMY_MAX_HP = 100;
 const ATTACK_DAMAGE = 10;
 const HIT_STUN_DURATION = 0.55;
-const WEAPON_HIT_RADIUS = 1.25;
+// 右手の上腕→前腕→手に沿った細いカプセル（大きな球判定はやめる）
+const ARM_HIT_RADIUS = 0.32;
 const PLAYER_HURTBOX_HEIGHT = 1.0;
+const PLAYER_HURTBOX_RADIUS = 0.4;
 
 function randRange([min, max]) {
   return min + Math.random() * (max - min);
@@ -30,6 +32,15 @@ function findBone(root, name) {
     if (!found && obj.isBone && obj.name === name) found = obj;
   });
   return found;
+}
+
+function distPointToSegment(p, a, b, tmp = new THREE.Vector3()) {
+  tmp.subVectors(b, a);
+  const lenSq = tmp.lengthSq();
+  if (lenSq < 1e-8) return p.distanceTo(a);
+  let t = ((p.x - a.x) * tmp.x + (p.y - a.y) * tmp.y + (p.z - a.z) * tmp.z) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (a.x + tmp.x * t), p.y - (a.y + tmp.y * t), p.z - (a.z + tmp.z * t));
 }
 
 export const MODEL_YAW_OFFSET = Math.PI;
@@ -57,6 +68,14 @@ export class EnemyAI {
     this._hitApplied = false;
     this._hitLanded = false;
     this.handBone = findBone(root, 'hand_r');
+    this.armBones = [
+      findBone(root, 'upperarm_r'),
+      findBone(root, 'lowerarm_r'),
+      findBone(root, 'hand_r'),
+    ].filter(Boolean);
+    this._bonePos = new THREE.Vector3();
+    this._bonePosB = new THREE.Vector3();
+    this._segTmp = new THREE.Vector3();
     this.knockback = new THREE.Vector3();
     this._attackKind = 'normal';
     this._profile = attackProfile('normal');
@@ -69,11 +88,15 @@ export class EnemyAI {
       attackRange: 2.15,
       closeRange: 1.2,
       engageRange: 5.0,
-      aggression: 0.5,
+      aggression: 0.45,
+      patienceMin: 0.7,
+      patienceMax: 1.4,
       poiseMax: 28,
-      delayedChance: 0.28,
-      comboChance: 0.38,
-      maxCombo: 2,
+      delayedChance: 0.18,
+      comboChance: 0.15,
+      maxCombo: 1,
+      recoverTime: [0.45, 0.85],
+      repositionChance: 0.22,
       facingYawOffset: Math.PI,
     });
   }
@@ -236,7 +259,6 @@ export class EnemyAI {
     this.attackDuration = base / this._profile.timeScale;
     this._hitApplied = false;
     this._hitLanded = false;
-    this._hitCount = 0;
     this._lungeBudget = this._profile.lunge;
     this.animator.trigger('attack');
     const a = this.animator.actions.attack;
@@ -262,26 +284,17 @@ export class EnemyAI {
       this._lungeBudget -= step;
     }
 
-    // 多段ヒット: 着弾窓で最大2ヒット
-    const maxHits = this._attackKind === 'combo' ? 2 : 1;
-    if (
-      this._hitCount < maxHits &&
-      t >= this._profile.impactT + this._hitCount * 0.18 &&
-      t <= this._profile.impactEnd
-    ) {
-      const weaponPos = this.handBone
-        ? this.handBone.getWorldPosition(new THREE.Vector3())
-        : this.position.clone().add(new THREE.Vector3(0, 1, 0));
+    // 1回の振りにつき1ヒット。右腕ボーン鎖のカプセルのみ
+    if (!this._hitApplied && t >= this._profile.impactT && t <= this._profile.impactEnd) {
       const playerCenter = new THREE.Vector3(
         playerPosition.x,
         playerPosition.y + PLAYER_HURTBOX_HEIGHT,
         playerPosition.z,
       );
-      if (weaponPos.distanceTo(playerCenter) <= WEAPON_HIT_RADIUS) {
-        this._hitCount += 1;
+      if (this._armHitsPlayer(playerCenter)) {
         this._hitApplied = true;
         this._hitLanded = true;
-        onPlayerHit?.(ATTACK_DAMAGE * this._profile.damageMult * (this._hitCount === 1 ? 1 : 0.65));
+        onPlayerHit?.(ATTACK_DAMAGE * this._profile.damageMult);
       }
     }
 
@@ -294,6 +307,28 @@ export class EnemyAI {
         this._startWindup('combo', playerPosition, ctx);
       }
     }
+  }
+
+  _armHitsPlayer(playerCenter) {
+    const bones = this.armBones;
+    if (!bones.length) {
+      const fallback = this.handBone
+        ? this.handBone.getWorldPosition(this._bonePos)
+        : this._bonePos.set(this.position.x, this.position.y + 1, this.position.z);
+      return fallback.distanceTo(playerCenter) <= ARM_HIT_RADIUS + PLAYER_HURTBOX_RADIUS;
+    }
+    for (let i = 0; i < bones.length; i++) {
+      bones[i].getWorldPosition(this._bonePos);
+      if (this._bonePos.distanceTo(playerCenter) <= ARM_HIT_RADIUS + PLAYER_HURTBOX_RADIUS) {
+        return true;
+      }
+      if (i + 1 < bones.length) {
+        bones[i + 1].getWorldPosition(this._bonePosB);
+        const d = distPointToSegment(playerCenter, this._bonePos, this._bonePosB, this._segTmp);
+        if (d <= ARM_HIT_RADIUS + PLAYER_HURTBOX_RADIUS) return true;
+      }
+    }
+    return false;
   }
 
   _updateHit() {
@@ -329,5 +364,29 @@ export class EnemyAI {
   _syncRoot() {
     this.root.position.copy(this.position);
     this.root.rotation.y = this.yaw + MODEL_YAW_OFFSET;
+  }
+
+  /** デバッグ用: 現在の攻撃ヒットボリューム */
+  getDebugHitVolumes() {
+    if (this.action !== 'attack' || !this._profile) return [];
+    const t = (performance.now() - this.actionStartedAt) / 1000 / this.attackDuration;
+    const active = t >= this._profile.impactT && t <= this._profile.impactEnd;
+    const out = [];
+    const bones = this.armBones;
+    if (bones.length >= 2) {
+      for (let i = 0; i < bones.length - 1; i++) {
+        const a = new THREE.Vector3();
+        const b = new THREE.Vector3();
+        bones[i].getWorldPosition(a);
+        bones[i + 1].getWorldPosition(b);
+        out.push({ kind: 'capsule', a, b, radius: ARM_HIT_RADIUS, team: 'enemy', active });
+      }
+    } else {
+      const center = this.handBone
+        ? this.handBone.getWorldPosition(new THREE.Vector3())
+        : new THREE.Vector3(this.position.x, this.position.y + 1, this.position.z);
+      out.push({ kind: 'sphere', center, radius: ARM_HIT_RADIUS, team: 'enemy', active });
+    }
+    return out;
   }
 }

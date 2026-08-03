@@ -11,7 +11,7 @@ export function findLockTarget(playerPos, cameraYaw, enemies, range = LOCK_RANGE
   const forward = new THREE.Vector3(-Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
 
   for (const enemy of enemies) {
-    if (!enemy.alive) continue;
+    if (!enemy.alive || enemy.action === 'fly') continue;
     const dx = enemy.position.x - playerPos.x;
     const dz = enemy.position.z - playerPos.z;
     const dist = Math.hypot(dx, dz);

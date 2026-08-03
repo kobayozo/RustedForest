@@ -1,12 +1,14 @@
 import * as THREE from 'three';
 
-const FADE_TIME = 0.25;
+const FADE_TIME = 0.28;
+const ATTACK_FADE = 0.18;
 
 export class EnemyAnimator {
   // clipMapは{state: clipName}(例: WARRIOR_CLIP_MAP/MINION_CLIP_MAP)。敵の見た目
   // ごとに使う攻撃モーションなどを変えられるよう、固定importではなく引数で受け取る
-  constructor(mixer, clips, clipMap) {
+  constructor(mixer, clips, clipMap, { fadeTime = FADE_TIME } = {}) {
     this.mixer = mixer;
+    this.fadeTime = fadeTime;
     this.actions = {};
     for (const [state, clipName] of Object.entries(clipMap)) {
       const clip = clips[clipName];
@@ -25,34 +27,67 @@ export class EnemyAnimator {
     const prev = this.currentState ? this.actions[this.currentState] : null;
     if (!next) return;
 
-    next.timeScale = state === 'run' ? 1.75 : 1;
-    next.reset().play();
+    // walk/run 等が同じクリップを使い回している敵(例:ドラゴン)では、
+    // ラベルが変わってもアクション実体は同じなので reset() すると
+    // 歩行サイクルが毎回0フレームへ巻き戻ってガタつく。ラベルだけ切替える
+    if (next === prev) {
+      this.currentState = state;
+      return;
+    }
+
+    // 攻撃系から戻るときもスムーズに
+    if (next.loop !== THREE.LoopRepeat) {
+      next.setLoop(THREE.LoopRepeat, Infinity);
+      next.clampWhenFinished = false;
+    }
+    next.timeScale = state === 'run' ? 1.55 : state === 'walk' ? 1.1 : 1;
+    next.enabled = true;
+    next.setEffectiveWeight(1);
+    next.play();
     if (prev && prev !== next) {
-      prev.crossFadeTo(next, FADE_TIME, true);
+      prev.crossFadeTo(next, this.fadeTime, false);
     } else {
-      next.fadeIn(FADE_TIME);
+      next.reset().fadeIn(this.fadeTime);
     }
     this.currentState = state;
   }
 
-  // 攻撃/被弾/死亡は同じstateが連続する可能性があり(例:攻撃→クールダウン→再攻撃の
-  // 間に必ずidle/walkを挟むため通常は問題ないが)、被弾は攻撃/移動どのstateからでも
-  // 割り込む可能性があるためsetState()のガードを迂回して確実に先頭から再生する。
-  // fadeIn()だけでは直前のアクション(例: run)が止まらずweight=1のまま残り続け、
-  // 以後ずっとポーズに混ざり込むため、対象以外を明示的にstop()してから再生する
-  trigger(state) {
+  /**
+   * 実際の移動速度にアニメ再生速度を追随させる(歩行サイクルと移動距離を一致させ、
+   * 足の滑りを防ぐ)。state切替はsetStateに任せ、その後timeScaleだけ毎フレーム上書きする。
+   */
+  setLocomotionSpeed(state, speedRatio) {
+    this.setState(state);
+    const action = this.actions[state] ?? this.actions.idle;
+    if (action) action.timeScale = Math.max(0.3, Math.min(3.0, speedRatio));
+  }
+
+  /**
+   * 攻撃/被弾/死亡。他アクションを即 stop せずクロスフェードで繋ぐ（瞬間切替を防ぐ）
+   */
+  trigger(state, { fade = ATTACK_FADE, loopOnce = true } = {}) {
     const action = this.actions[state];
     if (!action) return;
-    for (const [otherState, otherAction] of Object.entries(this.actions)) {
-      if (otherState !== state) otherAction.stop();
-    }
+    const prev = this.currentState ? this.actions[this.currentState] : null;
+
     action.reset();
-    if (state === 'death') {
+    if (loopOnce || state === 'death' || state === 'hit' || state === 'attack' || String(state).startsWith('attack')) {
       action.setLoop(THREE.LoopOnce, 1);
       action.clampWhenFinished = true;
+    } else {
+      action.setLoop(THREE.LoopRepeat, Infinity);
+      action.clampWhenFinished = false;
     }
+    action.enabled = true;
+    action.setEffectiveWeight(1);
     action.play();
-    action.fadeIn(0.1);
+
+    if (prev && prev !== action) {
+      // warping=false でポーズを滑らかに補間
+      prev.crossFadeTo(action, fade, false);
+    } else {
+      action.fadeIn(fade);
+    }
     this.currentState = state;
   }
 

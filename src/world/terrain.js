@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { fbm2D } from '../utils/noise.js';
 import { loadGrassTextures } from '../render/textures.js';
 
-const SIZE = 80;
-const SEGMENTS = 84;
+const SIZE = 160;
+const SEGMENTS = 120;
 const HEIGHT_SCALE = 3;
 const NOISE_SCALE = 0.06;
 // 原点(0,0)がノイズ格子の交点(特異点)に一致し不自然な窪地になるのを防ぐオフセット
@@ -18,8 +18,10 @@ const PATCH_OFFSET_Z = 271.9;
 
 // 城・池など「地形を平らにならしたい」場所の定義。座標はcastle.js/pond.js側の
 // 配置ロジックと共有する単一の情報源として、ここからimportして使う
-export const CASTLE_ANCHOR = { x: 18, z: -18, radius: 14, height: 1.4 };
-export const POND_ANCHOR = { x: -16, z: 14, radius: 7.5, height: -1.6 };
+export const CASTLE_ANCHOR = { x: 28, z: -28, radius: 14, height: 1.4 };
+export const POND_ANCHOR = { x: -22, z: 18, radius: 7.5, height: -1.6 };
+/** ドラゴンが城から出て戦う野外アリーナ */
+export const DRAGON_FIELD_ARENA = { x: 28, z: 8, radius: 12 };
 const FLATTEN_ZONES = [CASTLE_ANCHOR, POND_ANCHOR];
 
 function applyFlattening(x, z, rawHeight) {

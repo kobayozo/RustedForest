@@ -6,7 +6,7 @@ const WALK_SPEED = 4.2;          // デフォルト走り速度
 const SPRINT_SPEED = 8.5;        // Bダッシュ速度
 const LOCK_MOVE_SPEED = 4.2;     // ロックオン中も同じ走り速度
 const GUARD_WALK_SPEED = 1.7;
-const GUARD_DAMAGE_MULT = 0.28;
+const GUARD_DAMAGE_MULT = 0; // 盾で受けたとき体力は減らない（スタミナ消費のみ）
 const TURN_LAMBDA = 14;
 const ACCEL_LAMBDA = 10;
 export const PLAYER_BODY_RADIUS = 0.38;
@@ -35,10 +35,13 @@ const ATTACK_RECOVERY_CUT = 0.58;
 const ATTACK_COMBO_MAX = 3;
 const ATTACK_COMBO_WINDOW_START = 0.28;
 const ATTACK_COMBO_SPEED_STEP = 0.12;
+const LIGHT1_SPEED_MULT = 1.55; // 1発目の出を速く
 // 3段目: 出始めを速く、振り下ろし後に短く硬直
 const ATTACK3_SPEED_MULT = 1.55;
-const ATTACK3_RECOVERY_CUT = 0.92;
+const ATTACK3_RECOVERY_CUT = 0.72;
 const ATTACK3_COMBO_WINDOW_START = 0.35;
+const ATTACK3_LUNGE_DISTANCE = 1.0;
+const ATTACK3_LUNGE_END = 0.48;
 
 // 重攻撃
 const HEAVY_ATTACK_STAMINA_COST = 32;
@@ -70,7 +73,9 @@ const PLAYER_MAX_HP = 100;
 const HIT_STUN_DURATION = 0.65;
 const FLASK_HEAL = 45;
 const FLASK_MAX = 4;
-const FLASK_USE_TIME = 1.15;
+// 掲げるモーション(~1.15s)＋口元で少し保持してから終わる
+const FLASK_USE_TIME = 1.55;
+const REST_DURATION = 2.4;
 const BACKSTEP_DISTANCE = 2.4;
 const BACKSTEP_DURATION = 0.42;
 const BACKSTEP_STAMINA = 18;
@@ -140,6 +145,7 @@ export class PlayerController {
     this._bufferExpiresAt = 0;
     this.guardBroken = false;
     this._usingFlask = false;
+    this.flaskHealSfxPending = false;
 
     // B / Space: 短押しロール、長押しダッシュ判定用
     this._dodgeHeld = false;
@@ -147,6 +153,8 @@ export class PlayerController {
     this._dodgeRollPending = false;
     this._sprintArmed = false;
     this._rollRequested = false;
+    this._interactPressed = false;
+    this._restHealed = false;
     this.sprinting = false;
   }
 
@@ -163,7 +171,9 @@ export class PlayerController {
     const heavyAttackPressed = input.consumeJustPressed('Mouse2');
     const kickPressed = input.consumeJustPressed('KeyE');
     const flaskPressed = input.consumeJustPressed('KeyC') || input.consumeJustPressed('Digit1');
+    const interactPressed = input.consumeJustPressed('KeyT'); // ゲームパッドA / キーボードT
     const wantGuard = input.isDown('KeyQ');
+    this._interactPressed = interactPressed;
 
     this._updateDodgeSprintInput(dt, input);
 
@@ -189,6 +199,10 @@ export class PlayerController {
       this.blocking = false;
       this.sprinting = false;
       this._updateFlask();
+    } else if (this.action === 'rest') {
+      this.blocking = false;
+      this.sprinting = false;
+      this._updateRest();
     } else if (this.action === 'attack') {
       this.blocking = false;
       this.sprinting = false;
@@ -264,6 +278,7 @@ export class PlayerController {
       this.action !== 'hit' &&
       this.action !== 'guardBreak' &&
       this.action !== 'flask' &&
+      this.action !== 'rest' &&
       this.action !== 'dead'
     ) {
       this.animator.setState(this.state);
@@ -463,20 +478,67 @@ export class PlayerController {
     this._usingFlask = true;
     this.speed = 0;
     this.flasks = Math.max(0, this.flasks - 1);
-    this.animator.setState('idle');
+    this.flaskHealSfxPending = false;
+    // 掲げるモーション(地面に立てる前まで)＋軽い傾きで飲む
+    this.animator.triggerFlask();
+    this.animator.setFlaskTilt(0);
   }
 
   _updateFlask() {
     const t = (performance.now() - this.actionStartedAt) / 1000;
-    // 使用中はほぼ無防備（エルデンリングの回復隙）
-    if (t >= FLASK_USE_TIME * 0.45 && this._usingFlask) {
+    // 掲げたあと口元へ少し傾ける(モーション側で腕は上がっているので控えめに)
+    const u = Math.min(1, Math.max(0, (t - 0.35) / (FLASK_USE_TIME * 0.55)));
+    this.animator.setFlaskTilt(Math.sin(u * Math.PI) * 0.45);
+    if (t >= FLASK_USE_TIME * 0.55 && this._usingFlask) {
       this.hp = Math.min(PLAYER_MAX_HP, this.hp + FLASK_HEAL);
       this._usingFlask = false;
+      this.flaskHealSfxPending = true;
     }
     if (t >= FLASK_USE_TIME) {
       this.action = null;
       this.healing = false;
+      this.animator.endFlask();
+      this.animator.setState('idle');
     }
+  }
+
+  /** かがり火休息。A/T で呼ぶ */
+  startRest() {
+    if (this.action === 'dead' || this.action === 'rest') return false;
+    this.action = 'rest';
+    this.actionStartedAt = performance.now();
+    this.healing = false;
+    this.speed = 0;
+    this.blocking = false;
+    this.sprinting = false;
+    this._restHealed = false;
+    this.animator.setState('idle');
+    // 座り込み風に少し沈める
+    if (this.visualModel) {
+      this.visualModel.position.y = this._visualBaseY - 0.35;
+    }
+    return true;
+  }
+
+  _updateRest() {
+    const t = (performance.now() - this.actionStartedAt) / 1000;
+    this.speed = 0;
+    if (!this._restHealed && t >= REST_DURATION * 0.45) {
+      this._restHealed = true;
+      this.hp = PLAYER_MAX_HP;
+      this.flasks = FLASK_MAX;
+      this.stamina = STAMINA_MAX;
+    }
+    if (t >= REST_DURATION) {
+      this.action = null;
+      if (this.visualModel) this.visualModel.position.y = this._visualBaseY;
+    }
+  }
+
+  consumeInteractPressed() {
+    const v = !!this._interactPressed;
+    this._interactPressed = false;
+    return v;
   }
 
   /** 姿勢破壊された敵へのクリティカル */
@@ -531,7 +593,6 @@ export class PlayerController {
     }
 
     const stage = this.comboStage;
-    const speedMultiplier = 1 + stage * ATTACK_COMBO_SPEED_STEP;
     let baseDur = this.baseAttackDuration;
     if (stage === 1) baseDur = this.baseAttack2Duration;
     else if (stage >= 2) {
@@ -543,6 +604,8 @@ export class PlayerController {
       });
       return;
     }
+    const speedMultiplier =
+      stage === 0 ? LIGHT1_SPEED_MULT : 1 + stage * ATTACK_COMBO_SPEED_STEP;
     this.attackDuration = baseDur / speedMultiplier;
     this.animator.triggerAttack(speedMultiplier, {
       comboStage: stage,
@@ -612,6 +675,15 @@ export class PlayerController {
     const isFinisher = this.comboStage >= 2;
     const windowStart = isFinisher ? ATTACK3_COMBO_WINDOW_START : ATTACK_COMBO_WINDOW_START;
     const recoveryCut = isFinisher ? ATTACK3_RECOVERY_CUT : ATTACK_RECOVERY_CUT;
+
+    // 3段目は前方へ踏み込みながら出す
+    if (isFinisher && t < ATTACK3_LUNGE_END) {
+      const speedFactor = 2 * (1 - t / ATTACK3_LUNGE_END);
+      const dir = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+      const distanceThisFrame =
+        (ATTACK3_LUNGE_DISTANCE / (this.attackDuration * ATTACK3_LUNGE_END)) * speedFactor * dt;
+      this.position.addScaledVector(dir, distanceThisFrame);
+    }
 
     if (attackPressed && t >= windowStart && this.comboStage < ATTACK_COMBO_MAX - 1) {
       this._comboQueuedNext = true;
@@ -689,6 +761,8 @@ export class PlayerController {
         // 回復隙は必ずよろける
         this.healing = false;
         this._usingFlask = false;
+        this.flaskHealSfxPending = false;
+        this.animator.endFlask();
         if (this.hp > 0) this._startHit();
       } else if (this.action !== 'attack' && this.hp > 0) {
         this._startHit();
@@ -708,11 +782,15 @@ export class PlayerController {
   }
 
   _startHit() {
+    this.animator.endFlask?.();
     this.action = 'hit';
     this.actionTimer = 0;
     this.actionStartedAt = performance.now();
     this.state = 'hit';
     this.speed = 0;
+    this.healing = false;
+    this._usingFlask = false;
+    this.flaskHealSfxPending = false;
     this._comboQueuedNext = false;
     this.animator.triggerHit();
   }
@@ -730,10 +808,12 @@ export class PlayerController {
   }
 
   _startDeath() {
+    this.animator.endFlask?.();
     this.action = 'dead';
     this.state = 'dead';
     this.speed = 0;
     this.invincible = false;
+    this.healing = false;
     this.animator.triggerDeath();
   }
 

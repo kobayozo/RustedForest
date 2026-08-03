@@ -16,20 +16,13 @@ import {
   createEnemyMixer,
   MINION_CLIP_MAP,
 } from './enemy/enemyModel.js';
-import { loadMageAnimationLibrary, loadMageMesh, createMageMixer, MAGE_CLIP_MAP } from './enemy/mageModel.js';
 import { loadDragonAnimationLibrary, loadDragonMesh, createDragonMixer, DRAGON_CLIP_MAP } from './enemy/dragonModel.js';
+import { loadMageAnimationLibrary, loadMageMesh, createMageMixer, MAGE_CLIP_MAP } from './enemy/mageModel.js';
+import { loadAnimalAnimationLibrary, loadAnimalMesh, createAnimalMixer, ANIMAL_CLIP_MAP } from './enemy/animalModel.js';
 import { EnemyAnimator } from './enemy/enemyAnimator.js';
 import { EnemyAI } from './enemy/enemyAI.js';
-import { MageAI } from './enemy/mageAI.js';
 import { DragonAI } from './enemy/dragonAI.js';
-import { loadGwynAnimationLibrary, loadGwynMesh, createGwynMixer, GWYN_CLIP_MAP } from './enemy/gwynModel.js';
-import { GwynAI } from './enemy/gwynAI.js';
-import {
-  loadAnimalAnimationLibrary,
-  loadAnimalMesh,
-  createAnimalMixer,
-  ANIMAL_CLIP_MAP,
-} from './enemy/animalModel.js';
+import { MageAI } from './enemy/mageAI.js';
 import { AnimalAI, ANIMAL_PRESETS } from './enemy/animalAI.js';
 import { getHeightAt, CASTLE_ANCHOR } from './world/terrain.js';
 import { setCastleColliders, resolveCircleColliders, separateCircles, getGroundHeight } from './physics/collision.js';
@@ -39,6 +32,7 @@ import { createPlayerVitals, createEnemyHealthBar, createGameOverScreen, createB
 import { AudioManager } from './audio/audioManager.js';
 import { FootstepPlayer } from './audio/footsteps.js';
 import { HitFlash, spawnHitSpark, updateHitSparks } from './combat/hitEffects.js';
+import { HitboxDebug } from './combat/hitboxDebug.js';
 import { findLockTarget, getLockFocusPosition, shouldBreakLock } from './combat/lockOn.js';
 import { createPlayerCombatContext, syncPlayerCombatContext } from './enemy/soulsCombat.js';
 import {
@@ -59,6 +53,8 @@ const HIT_PLAYER_THUD_SOUNDS = ['hitPlayer0', 'hitPlayer1', 'hitPlayer2'];
 // ひとつ目の線分(前腕→手首)は腕の長さを、ふたつ目(手首→刃先)は刃を表す
 const WEAPON_HIT_RADIUS = 0.55; // 細くして精度を上げる
 const SWORD_BLADE_LENGTH = 0.95; // characterModel の SWORD_WORLD_LENGTH と揃える
+const ATTACK3_BLADE_EXTRA = 0.85; // 3段目は前方長め
+const ATTACK3_HIT_RADIUS_BONUS = 0.25;
 const ENEMY_HURTBOX_HEIGHT = 1.0;
 const ENEMY_HURTBOX_RADIUS_DEFAULT = 0.55;
 const LIGHT_ATTACK_DAMAGE = 14;
@@ -66,15 +62,19 @@ const HEAVY_ATTACK_DAMAGE = 32;
 const JUMP_ATTACK_DAMAGE = 22;
 const KICK_DAMAGE = 12;
 const HIT_SPARK_HEIGHT = 1.0;
-const HEAVY_HIT_WINDOW_START = 0.28;
-const HEAVY_HIT_WINDOW_END = 0.72;
-const HEAVY_WHIFF_SFX_T = 0.38;
+// 重攻撃モーションは 前振りかぶり(後方)→本振り(前方)→フォロースルー(再び後方) と
+// 剣先が前後に往復するため、窓を広く取ると振りかぶり/フォロースルー中の「後方」判定まで
+// 拾ってしまい後ろの敵にも当たる。剣先が実際に前方へ伸びる区間だけに絞る
+// (実測: t=0.40-0.49 のみ剣先/柄/前腕の全てが前方に位置する)
+const HEAVY_HIT_WINDOW_START = 0.4;
+const HEAVY_HIT_WINDOW_END = 0.49;
+const HEAVY_WHIFF_SFX_T = 0.5;
 const LIGHT_HIT_IMPACT_T = 0.4;
 const JUMP_HIT_IMPACT_T = 0.35;
 const KICK_HIT_IMPACT_T = 0.4;
 const KICK_REACH = 1.35;
 const KICK_HIT_RADIUS = 0.7;
-const LIGHT_KNOCKBACK = 0; // 1〜2段はノックバックなし
+const LIGHT_KNOCKBACK = 5.5; // 2発目からノックバック
 const FINISHER_KNOCKBACK = 7.5;
 const HEAVY_KNOCKBACK = 9;
 const JUMP_KNOCKBACK = 8;
@@ -82,9 +82,12 @@ const KICK_KNOCKBACK = 6.5;
 const CRITICAL_DAMAGE = 58;
 const HITSTOP_LIGHT = 0.045;
 const HITSTOP_HEAVY = 0.085;
+// マップ全域に散らばる野生動物は、非戦闘かつこの距離より遠ければAI/アニメ更新を省略する
+const WILDLIFE_SIM_RADIUS = 45;
+const WILDLIFE_SIM_RADIUS_SQ = WILDLIFE_SIM_RADIUS * WILDLIFE_SIM_RADIUS;
 
-// 城(18,-18)から十分離れた初期位置
-const PLAYER_SPAWN = new THREE.Vector3(-28, 0, 42);
+// 拡大マップ内の草原寄りにスポーン（旧 -28,42 は地形外だった）
+const PLAYER_SPAWN = new THREE.Vector3(-18, 0, 28);
 // 死亡クリップのこの割合まで再生してから YOU DIED を出す(ほぼ倒れきった後)
 const GAME_OVER_DEATH_PROGRESS = 0.92;
 
@@ -103,20 +106,35 @@ async function main() {
   scene.add(terrain);
   scene.add(createRocks());
 
-  // Wizard FBX は他FBXと並列だと FBXLoader が壊れることがあるため、騎士ロード後に単独取得する
-  const [castleResult, forest, pond, character, enemyClipLib, minionMesh, dragonPack] = await Promise.all([
-    createCastle(),
-    createForest(),
-    createPond(),
-    loadCharacterModel(),
-    loadEnemyAnimationLibrary(),
-    loadEnemyMesh(false),
-    Promise.all([loadDragonMesh(), loadDragonAnimationLibrary()]),
-  ]);
-  const [mageMesh, mageClipLib] = await Promise.all([loadMageMesh(), loadMageAnimationLibrary()]);
-  // Gwyn FBX も並列を避けて後段でロード
-  const [gwynMesh, gwynClipLib] = await Promise.all([loadGwynMesh(), loadGwynAnimationLibrary()]);
+  // Wizard/Ritual FBX は他FBXと並列だと FBXLoader が壊れることがあるため、騎士ロード後に単独取得する
+  const animalKeys = Object.keys(ANIMAL_PRESETS);
+  const [castleResult, forest, pond, character, enemyClipLib, minionMesh, dragonPack, ...animalPacks] =
+    await Promise.all([
+      createCastle(),
+      createForest(),
+      createPond(),
+      loadCharacterModel(),
+      loadEnemyAnimationLibrary(),
+      loadEnemyMesh(false),
+      Promise.all([loadDragonMesh(), loadDragonAnimationLibrary()]),
+      ...animalKeys.map((key) => {
+        const preset = ANIMAL_PRESETS[key];
+        return Promise.all([
+          loadAnimalMesh(preset.path, preset.height),
+          loadAnimalAnimationLibrary(preset.path),
+        ]);
+      }),
+    ]);
   const [dragonMesh, dragonClipLib] = dragonPack;
+  const animalMeshByKey = {};
+  const animalClipLibByKey = {};
+  animalKeys.forEach((key, i) => {
+    animalMeshByKey[key] = animalPacks[i][0];
+    animalClipLibByKey[key] = animalPacks[i][1];
+  });
+  // RitualWoman(65MB) + Magic Pack は重いので他のあとで直列ロード
+  hud.textContent = 'Loading mage...';
+  const [mageMesh, mageClipLib] = await Promise.all([loadMageMesh(), loadMageAnimationLibrary()]);
   const castle = castleResult.group;
   setCastleColliders(castleResult.colliders);
   scene.add(castle);
@@ -127,6 +145,7 @@ async function main() {
   scene.add(characterRoot);
   const animator = new CharacterAnimator(mixers, clips, swordRig);
   const playerHitFlash = new HitFlash(characterRoot);
+  const hitboxDebug = new HitboxDebug(scene);
 
     PLAYER_SPAWN.y = getHeightAt(PLAYER_SPAWN.x, PLAYER_SPAWN.z);
   const controller = new PlayerController(characterRoot, animator, visualModel, groundYBias ?? 0);
@@ -147,20 +166,12 @@ async function main() {
     return enemy;
   }
 
-  function spawnMage(meshScene, spawnPos) {
-    scene.add(meshScene);
-    const mixer = createMageMixer(meshScene);
-    const enemyAnimator = new EnemyAnimator(mixer, mageClipLib, MAGE_CLIP_MAP);
-    const enemy = new MageAI(meshScene, enemyAnimator, spawnPos, scene);
-    enemy.hitFlash = new HitFlash(meshScene);
-    initEnemyStance(enemy, 55);
-    return enemy;
-  }
-
   function spawnDragon(meshScene, spawnPos) {
     scene.add(meshScene);
     const mixer = createDragonMixer(meshScene);
-    const enemyAnimator = new EnemyAnimator(mixer, dragonClipLib, DRAGON_CLIP_MAP);
+    const enemyAnimator = new EnemyAnimator(mixer, dragonClipLib, DRAGON_CLIP_MAP, {
+      fadeTime: 0.35,
+    });
     const enemy = new DragonAI(meshScene, enemyAnimator, spawnPos);
     enemy.hitFlash = new HitFlash(meshScene);
     enemy.hurtboxRadius = 2.4;
@@ -169,41 +180,37 @@ async function main() {
     return enemy;
   }
 
-  function spawnGwyn(meshScene, spawnPos) {
+  function spawnMage(meshScene, spawnPos) {
     scene.add(meshScene);
-    const mixer = createGwynMixer(meshScene);
-    const enemyAnimator = new EnemyAnimator(mixer, gwynClipLib, GWYN_CLIP_MAP);
-    const enemy = new GwynAI(meshScene, enemyAnimator, spawnPos);
+    const mixer = createMageMixer(meshScene);
+    const enemyAnimator = new EnemyAnimator(mixer, mageClipLib, MAGE_CLIP_MAP, {
+      fadeTime: 0.22,
+    });
+    const enemy = new MageAI(meshScene, enemyAnimator, spawnPos, scene);
     enemy.hitFlash = new HitFlash(meshScene);
-    initEnemyStance(enemy, 120);
+    enemy.hurtboxRadius = 0.5;
+    enemy.hurtboxHeight = 1.1;
+    initEnemyStance(enemy, 55);
     return enemy;
   }
 
-  async function spawnAnimal(presetKey, spawnPos) {
-    const preset = ANIMAL_PRESETS[presetKey];
-    const [mesh, clipLib] = await Promise.all([
-      loadAnimalMesh(preset.path, preset.height),
-      loadAnimalAnimationLibrary(preset.path),
-    ]);
-    scene.add(mesh);
-    const mixer = createAnimalMixer(mesh);
-    const enemyAnimator = new EnemyAnimator(mixer, clipLib, ANIMAL_CLIP_MAP);
-    const { path: _path, height: _h, ...aiOpts } = preset;
-    const enemy = new AnimalAI(mesh, enemyAnimator, spawnPos, aiOpts);
-    enemy.hitFlash = new HitFlash(mesh);
-    initEnemyStance(enemy, aiOpts.poiseMax ?? 40);
+  // 動物系(Gobkit Free Animal Pack, CC0)。既存の汎用AnimalAI+ソウル系間合いブレインを
+  // そのまま使い回せるので、モデル/クリップだけpreset単位でロードする
+  function spawnAnimal(key, spawnPos) {
+    const preset = ANIMAL_PRESETS[key];
+    const meshScene = animalMeshByKey[key];
+    scene.add(meshScene);
+    const mixer = createAnimalMixer(meshScene);
+    const enemyAnimator = new EnemyAnimator(mixer, animalClipLibByKey[key], ANIMAL_CLIP_MAP, {
+      fadeTime: 0.25,
+    });
+    const enemy = new AnimalAI(meshScene, enemyAnimator, spawnPos, preset);
+    enemy.hitFlash = new HitFlash(meshScene);
+    initEnemyStance(enemy, preset.poiseMax ?? 40);
+    // 非戦闘時は遠距離シミュレーション省略の対象にする(WILDLIFE_SIM_RADIUS参照)
+    enemy.isWildlife = true;
     return enemy;
   }
-
-  // 魔法使いは城から離した森側に配置
-  const mageSpawn = new THREE.Vector3(
-    CASTLE_ANCHOR.x + 22,
-    0,
-    CASTLE_ANCHOR.z + CASTLE_ANCHOR.radius + 28
-  );
-  mageSpawn.y = getHeightAt(mageSpawn.x, mageSpawn.z);
-  const mageAI = spawnMage(mageMesh, mageSpawn);
-  mageAI.name = '魔法使い';
 
   const minionSpawn = new THREE.Vector3(
     CASTLE_ANCHOR.x - 9,
@@ -214,36 +221,39 @@ async function main() {
   const minionAI = spawnEnemy(minionMesh, MINION_CLIP_MAP, minionSpawn);
   minionAI.name = '野盗';
 
-  // グウィンは城門前の広場側
-  const gwynSpawn = new THREE.Vector3(
-    CASTLE_ANCHOR.x - 4,
+  const mageSpawn = new THREE.Vector3(
+    CASTLE_ANCHOR.x + 11,
     0,
-    CASTLE_ANCHOR.z + CASTLE_ANCHOR.radius + 10
+    CASTLE_ANCHOR.z + CASTLE_ANCHOR.radius + 5,
   );
-  gwynSpawn.y = getHeightAt(gwynSpawn.x, gwynSpawn.z);
-  const gwynAI = spawnGwyn(gwynMesh, gwynSpawn);
-  gwynAI.name = 'グウィン';
+  mageSpawn.y = getHeightAt(mageSpawn.x, mageSpawn.z);
+  const mageAI = spawnMage(mageMesh, mageSpawn);
 
   const dragonSpawn = new THREE.Vector3(CASTLE_ANCHOR.x, 0, CASTLE_ANCHOR.z);
   dragonSpawn.y = getHeightAt(dragonSpawn.x, dragonSpawn.z);
   const dragonAI = spawnDragon(dragonMesh, dragonSpawn);
   dragonAI.name = 'ドラゴン';
 
-  // 動物系敵はプレイヤー初期位置付近の草原に散らばせて配置
-  const animalSpawns = [
-    { key: 'rhino', pos: new THREE.Vector3(-18, 0, 30) },
-    { key: 'hippo', pos: new THREE.Vector3(-35, 0, 28) },
-    { key: 'bat', pos: new THREE.Vector3(-22, 0, 50) },
-    { key: 'redPanda', pos: new THREE.Vector3(-40, 0, 45) },
-  ];
-  for (const s of animalSpawns) {
-    s.pos.y = getHeightAt(s.pos.x, s.pos.z);
-  }
-  const animalAIs = await Promise.all(
-    animalSpawns.map((s) => spawnAnimal(s.key, s.pos)),
-  );
+  // 野生動物: 城/ドラゴンアリーナ/池から離れた草原各所に配置し、探索中の小規模な
+  // 戦闘の起伏を作る(いずれも既存AnimalAIのpresetをそのまま使用)
+  const ANIMAL_SPAWN_POS = {
+    rhino: new THREE.Vector3(15, 0, 45),
+    hippo: new THREE.Vector3(-45, 0, -5),
+    bat: new THREE.Vector3(50, 0, 20),
+    redPanda: new THREE.Vector3(-40, 0, 40),
+    corgi: new THREE.Vector3(5, 0, 15),
+    duck: new THREE.Vector3(-15, 0, 24),
+    platypus: new THREE.Vector3(-30, 0, 20),
+  };
+  const animalAIs = animalKeys.map((key) => {
+    const pos = ANIMAL_SPAWN_POS[key] ?? new THREE.Vector3();
+    pos.y = getHeightAt(pos.x, pos.z);
+    const animal = spawnAnimal(key, pos);
+    animal.name = ANIMAL_PRESETS[key].name;
+    return animal;
+  });
 
-  const enemies = [mageAI, minionAI, gwynAI, dragonAI, ...animalAIs];
+  const enemies = [minionAI, mageAI, dragonAI, ...animalAIs];
 
   hud.textContent = '';
   const playerVitals = createPlayerVitals(hud);
@@ -280,12 +290,29 @@ async function main() {
     slashHit7: '/audio/slash_hit7.mp3',
     bokutoSwing: '/audio/bokuto_swing.mp3',
     yodguard: '/audio/yodguard.mp3',
-    exploreBgm: '/audio/explore_theme.mp3',
-    battleNormalBgm: '/audio/battle_normal.mp3', // FF10風の通常戦闘
+    exploreBgm: '/audio/explore_theme.mp3', // フォールバック
+    // 通常時: 壮大なオーケストラ系を複数ロードし、入場時にランダム選曲
+    exploreJourney: '/audio/explore/explore_journey.mp3',
+    exploreFantasy: '/audio/explore/explore_fantasy.mp3',
+    exploreArcana: '/audio/explore/explore_arcana.mp3',
+    exploreAdventure: '/audio/explore/explore_adventure.mp3',
+    exploreEternal: '/audio/explore/explore_eternal.mp3',
+    exploreLegend: '/audio/explore/explore_legend.mp3',
+    battleNormalBgm: '/audio/battle_normal.mp3', // DQ5「戦闘のテーマ」(Monsters)
     bossBgm: '/audio/battle_bgm.mp3', // ドラゴン専用
+    youDied: '/audio/you_died.mp3', // デモンズソウル系 YOU DIED
+    // ドラゴン鳴き声: OpenGameArt troll-roars (CC0) + Mixkit creature/dino roar
+    dragonRoar: '/audio/dragon_roar.mp3',
+    dragonGrowl: '/audio/dragon_growl.ogg',
+    dragonSnarl: '/audio/dragon_snarl.mp3',
   });
   // 探索BGMは最初の入力で AudioContext が resume されたあとから鳴る
   audio.setCombatMusic('explore');
+  dragonAI.setSfxHandler((kind) => {
+    if (kind === 'roar') audio.playDragonRoar();
+    else if (kind === 'stomp') audio.playDragonStomp();
+    else if (kind === 'growl') audio.playDragonGrowl();
+  });
   const footsteps = new FootstepPlayer(audio, FOOTSTEP_SOUNDS);
   let previousControllerState = controller.state;
   // 軽攻撃は1トリガー1判定。重攻撃は踏み込み中に剣線分で連続判定し、敵ごとに1回まで
@@ -324,14 +351,20 @@ async function main() {
     blade.updateWorldMatrix(true, false);
     _swordDir.set(0, 1, 0).transformDirection(blade.matrixWorld).normalize();
     swordRig.sword.getWorldPosition(gripOut);
-    tipOut.copy(gripOut).addScaledVector(_swordDir, SWORD_BLADE_LENGTH);
+    let bladeLen = SWORD_BLADE_LENGTH;
+    if (controller.attackKind === 'light' && controller.comboStage >= 2) {
+      bladeLen += ATTACK3_BLADE_EXTRA;
+      // 踏み込み分さらに前方へ延長
+      const fwd = new THREE.Vector3(-Math.sin(controller.yaw), 0, -Math.cos(controller.yaw));
+      tipOut.copy(gripOut).addScaledVector(_swordDir, bladeLen).addScaledVector(fwd, 0.55);
+    } else {
+      tipOut.copy(gripOut).addScaledVector(_swordDir, bladeLen);
+    }
 
-    // 前腕ボーンが取れる場合はその位置を使う。取れない場合はgrip位置で代用
     if (swordRig.rightForearmBone) {
       swordRig.rightForearmBone.getWorldPosition(elbowOut);
     } else if (swordRig.handBone) {
       swordRig.handBone.getWorldPosition(elbowOut);
-      // 手首から刃方向の逆に前腕の長さ分だけずらして肘位置を推定
       elbowOut.addScaledVector(_swordDir, -0.35);
     } else {
       elbowOut.copy(gripOut);
@@ -350,14 +383,15 @@ async function main() {
   function buildHitOptions() {
     const kind = controller.attackKind;
     const forward = new THREE.Vector3(-Math.sin(controller.yaw), 0, -Math.cos(controller.yaw));
-    if (kind === 'light' && controller.comboStage < 2) {
+    // 軽攻撃1発目のみノックバックなし。2発目以降は弾く
+    if (kind === 'light' && controller.comboStage < 1) {
       return { stagger: false, knockback: null, stanceDmg: stanceDamageForAttack(kind, controller.comboStage) };
     }
     let force = FINISHER_KNOCKBACK;
     if (kind === 'heavy' || kind === 'critical') force = HEAVY_KNOCKBACK;
     else if (kind === 'jump') force = JUMP_KNOCKBACK;
     else if (kind === 'kick') force = KICK_KNOCKBACK;
-    else if (kind === 'light') force = FINISHER_KNOCKBACK;
+    else if (kind === 'light') force = controller.comboStage >= 2 ? FINISHER_KNOCKBACK : LIGHT_KNOCKBACK;
     return {
       stagger: true,
       forceStagger: kind === 'kick' || kind === 'jump' || kind === 'heavy' || kind === 'critical',
@@ -374,11 +408,15 @@ async function main() {
 
     let hitOpts = { ...opts };
     if (target.action === 'attack' && !hitOpts.forceStagger) {
-      const elapsed = target.actionStartedAt
-        ? (performance.now() - target.actionStartedAt) / 1000
-        : 0;
-      const dur = target.attackDuration || 1;
-      const t = elapsed / dur;
+      // ミキサーの実再生時間から算出したtがあればそちらを優先する(見た目のポーズと一致する)
+      let t = target._lastAttackT;
+      if (t == null) {
+        const elapsed = target.actionStartedAt
+          ? (performance.now() - target.actionStartedAt) / 1000
+          : 0;
+        const dur = target.attackDuration || 1;
+        t = elapsed / dur;
+      }
       if (inHyperArmorWindow(target, t)) {
         hitOpts.stagger = false;
       }
@@ -422,13 +460,17 @@ async function main() {
     let bestDist = Infinity;
     const candidates = lockTarget?.alive ? [lockTarget, ...enemies] : enemies;
     for (const enemy of candidates) {
-      if (!enemy.alive) continue;
+      if (!enemy.alive || enemy.action === 'fly') continue;
       if (oncePerEnemy && heavyHitEnemies.has(enemy)) continue;
       const hurtH = enemy.hurtboxHeight ?? ENEMY_HURTBOX_HEIGHT;
       const hurtR = enemy.hurtboxRadius ?? ENEMY_HURTBOX_RADIUS_DEFAULT;
       _enemyCenter.set(enemy.position.x, enemy.position.y + hurtH, enemy.position.z);
       const dist = distancePointToArm(_enemyCenter, _elbowPos, _swordGrip, _swordTip);
-      if (dist > WEAPON_HIT_RADIUS + hurtR) continue;
+      let hitR = WEAPON_HIT_RADIUS + hurtR;
+      if (controller.attackKind === 'light' && controller.comboStage >= 2) {
+        hitR += ATTACK3_HIT_RADIUS_BONUS;
+      }
+      if (dist > hitR) continue;
       if (lockTarget && enemy === lockTarget) {
         target = enemy;
         break;
@@ -459,6 +501,83 @@ async function main() {
     return true;
   }
 
+  function drawVolume(v) {
+    if (v.kind === 'sphere') {
+      hitboxDebug.sphere(v.center, v.radius, { team: v.team, active: v.active, hurt: v.hurt });
+    } else if (v.kind === 'capsule') {
+      hitboxDebug.capsule(v.a, v.b, v.radius, { team: v.team, active: v.active });
+    } else if (v.kind === 'cone') {
+      hitboxDebug.cone(v.origin, v.dir, v.length, v.halfAngle, { team: v.team, active: v.active });
+    }
+  }
+
+  function playerAttackActive(t) {
+    if (controller.attackKind === 'heavy') {
+      return t >= HEAVY_HIT_WINDOW_START && t <= HEAVY_HIT_WINDOW_END;
+    }
+    if (controller.attackKind === 'kick') return t >= KICK_HIT_IMPACT_T && t <= KICK_HIT_IMPACT_T + 0.2;
+    if (controller.attackKind === 'jump') return t >= JUMP_HIT_IMPACT_T && t <= JUMP_HIT_IMPACT_T + 0.2;
+    return t >= LIGHT_HIT_IMPACT_T && t <= LIGHT_HIT_IMPACT_T + 0.2;
+  }
+
+  /** 敵味方の攻撃判定＋受け側hurtboxを色分け表示 */
+  function updateHitboxDebug() {
+    // 無効時はVector3生成や全敵ループそのものを省略する(既定で無効)
+    if (!hitboxDebug.enabled) return;
+    hitboxDebug.begin();
+
+    // プレイヤー受け側
+    hitboxDebug.sphere(
+      new THREE.Vector3(
+        controller.position.x,
+        controller.position.y + 1.0,
+        controller.position.z,
+      ),
+      0.4,
+      { hurt: true, active: true },
+    );
+
+    // 敵受け側
+    for (const enemy of enemies) {
+      if (!enemy.alive) continue;
+      const hurtH = enemy.hurtboxHeight ?? ENEMY_HURTBOX_HEIGHT;
+      const hurtR = enemy.hurtboxRadius ?? ENEMY_HURTBOX_RADIUS_DEFAULT;
+      hitboxDebug.sphere(
+        new THREE.Vector3(enemy.position.x, enemy.position.y + hurtH, enemy.position.z),
+        hurtR,
+        { hurt: true, active: true },
+      );
+    }
+
+    // プレイヤー攻撃
+    if (controller.action === 'attack') {
+      const t = controller.actionTimer / controller.attackDuration;
+      const active = playerAttackActive(t);
+      if (controller.attackKind === 'kick') {
+        const forward = new THREE.Vector3(-Math.sin(controller.yaw), 0, -Math.cos(controller.yaw));
+        const kickPos = controller.position.clone().addScaledVector(forward, KICK_REACH);
+        kickPos.y += 0.55;
+        hitboxDebug.sphere(kickPos, KICK_HIT_RADIUS, { team: 'player', active });
+      } else {
+        getSwordSegment(_swordGrip, _swordTip, _elbowPos);
+        let hitR = WEAPON_HIT_RADIUS;
+        if (controller.attackKind === 'light' && controller.comboStage >= 2) {
+          hitR += ATTACK3_HIT_RADIUS_BONUS;
+        }
+        hitboxDebug.capsule(_elbowPos, _swordGrip, hitR, { team: 'player', active });
+        hitboxDebug.capsule(_swordGrip, _swordTip, hitR, { team: 'player', active });
+      }
+    }
+
+    // 敵攻撃
+    for (const enemy of enemies) {
+      if (!enemy.alive || !enemy.getDebugHitVolumes) continue;
+      for (const v of enemy.getDebugHitVolumes()) drawVolume(v);
+    }
+
+    hitboxDebug.end();
+  }
+
   // キック: 前方の脚位置で判定。必ずのけぞり＋ノックバック
   function tryKickEnemy() {
     const forward = new THREE.Vector3(-Math.sin(controller.yaw), 0, -Math.cos(controller.yaw));
@@ -469,7 +588,7 @@ async function main() {
     let bestDist = Infinity;
     const candidates = lockTarget?.alive ? [lockTarget, ...enemies] : enemies;
     for (const enemy of candidates) {
-      if (!enemy.alive) continue;
+      if (!enemy.alive || enemy.action === 'fly') continue;
       const hurtH = enemy.hurtboxHeight ?? ENEMY_HURTBOX_HEIGHT;
       const hurtR = enemy.hurtboxRadius ?? ENEMY_HURTBOX_RADIUS_DEFAULT;
       _enemyCenter.set(enemy.position.x, enemy.position.y + hurtH * 0.55, enemy.position.z);
@@ -498,6 +617,15 @@ async function main() {
   }
 
   // HPバーに表示する敵は、ロック中 or 索敵中(chase)のみ
+  function isEnemyEngaged(enemy) {
+    return (
+      enemy.state === 'chase' ||
+      enemy.action === 'attack' ||
+      enemy.action === 'windup' ||
+      enemy.action === 'hit'
+    );
+  }
+
   function pickDisplayEnemy() {
     if (lockTarget?.alive) return lockTarget;
     let best = null;
@@ -518,7 +646,7 @@ async function main() {
   function resolveBodyCollisions(player, enemyList) {
     const pR = player.bodyRadius ?? 0.38;
     for (const enemy of enemyList) {
-      if (!enemy.alive || enemy.action === 'dead') continue;
+      if (!enemy.alive || enemy.action === 'dead' || enemy.action === 'fly') continue;
       const eR = enemy.bodyRadius ?? 0.4;
       // 大きい敵ほど動かず、プレイヤー側が押し出される
       const sep = separateCircles(
@@ -536,10 +664,10 @@ async function main() {
     // 敵同士も軽く押し出す
     for (let i = 0; i < enemyList.length; i++) {
       const a = enemyList[i];
-      if (!a.alive || a.action === 'dead') continue;
+      if (!a.alive || a.action === 'dead' || a.action === 'fly') continue;
       for (let j = i + 1; j < enemyList.length; j++) {
         const b = enemyList[j];
-        if (!b.alive || b.action === 'dead') continue;
+        if (!b.alive || b.action === 'dead' || b.action === 'fly') continue;
         const aR = a.bodyRadius ?? 0.4;
         const bR = b.bodyRadius ?? 0.4;
         const sep = separateCircles(
@@ -564,6 +692,11 @@ async function main() {
 
     for (const enemy of enemyList) {
       if (!enemy.alive) continue;
+      // 飛行中は地形コライダーや地面高さの拘束を受けない(ドラゴンの飛行演出用)
+      if (enemy.action === 'fly') {
+        enemy.root.position.copy(enemy.position);
+        continue;
+      }
       const eR = enemy.bodyRadius ?? 0.4;
       const resolved = resolveCircleColliders(enemy.position.x, enemy.position.z, eR);
       enemy.position.x = resolved.x;
@@ -579,15 +712,29 @@ async function main() {
     setCameraPitch: (p) => { thirdPersonCamera.pitch = p; },
     teleport: (x, z) => { controller.position.set(x, 0, z); },
     controller,
-    enemyAI: mageAI,
-    mageAI,
+    enemyAI: minionAI,
     minionAI,
-    gwynAI,
     dragonAI,
     enemies,
     camera,
     thirdPersonCamera,
     characterRoot,
+    hitboxDebug,
+    getSwordSegment: () => {
+      const g = new THREE.Vector3();
+      const tp = new THREE.Vector3();
+      const e = new THREE.Vector3();
+      getSwordSegment(g, tp, e);
+      return { grip: g.toArray(), tip: tp.toArray(), elbow: e.toArray() };
+    },
+    setHitboxDebug: (on) => {
+      hitboxDebug.enabled = !!on;
+      if (!hitboxDebug.enabled) {
+        hitboxDebug.begin();
+        hitboxDebug.end();
+      }
+    },
+    stepFrame: (dt) => update(dt),
   };
 
   function update(rawDt) {
@@ -612,6 +759,7 @@ async function main() {
         gameOverScreen.hide();
         gameOverShown = false;
         deathTimer = 0;
+        audio.setCombatMusic('explore');
       }
     } else {
       if (lockPressed) {
@@ -629,22 +777,35 @@ async function main() {
       thirdPersonCamera.setLockFocus(lockPos);
       controller.criticalTarget = lockTarget;
       controller.update(dt, input, thirdPersonCamera.yaw, lockPos);
+
       if (controller.action === 'dead') {
         lockTarget = null;
         thirdPersonCamera.setLockFocus(null);
         deathTimer += dt;
         // 倒れきってから YOU DIED を出す
         if (deathTimer >= controller.deathDuration * GAME_OVER_DEATH_PROGRESS) {
-          gameOverScreen.show();
-          gameOverShown = true;
+          if (!gameOverShown) {
+            gameOverScreen.show();
+            gameOverShown = true;
+            audio.stopBgm({ fade: 0.4 });
+            audio.play('youDied', { volume: 1.0 });
+          }
         }
       } else {
         deathTimer = 0;
       }
     }
     const hpBeforeEnemyTurn = controller.hp;
+    const stamBeforeEnemyTurn = controller.stamina;
     syncPlayerCombatContext(playerCombatCtx, controller, dt);
     for (const enemy of enemies) {
+      // 非戦闘中で十分に離れている野生動物はAI/アニメ更新そのものを省略し、
+      // マップ全域に多数配置しても負荷が増えないようにする(見えない距離なので体感差はない)
+      if (enemy.isWildlife && enemy.alive && !isEnemyEngaged(enemy)) {
+        const dx = enemy.position.x - controller.position.x;
+        const dz = enemy.position.z - controller.position.z;
+        if (dx * dx + dz * dz > WILDLIFE_SIM_RADIUS_SQ) continue;
+      }
       updateEnemyStance(enemy, dt);
       // 回復中は敵が強く狙い、ロール狩りしやすくする
       if (controller.healing) playerCombatCtx.staminaRatio = Math.min(playerCombatCtx.staminaRatio, 0.15);
@@ -658,7 +819,9 @@ async function main() {
     // プレイヤーと敵が貫通しないよう体当たりで押し出す
     resolveBodyCollisions(controller, enemies);
     thirdPersonCamera.update(dt, controller.position);
-    if (controller.hp < hpBeforeEnemyTurn) {
+    const tookHp = controller.hp < hpBeforeEnemyTurn;
+    const tookStamina = controller.stamina < stamBeforeEnemyTurn - 0.01;
+    if (tookHp || (tookStamina && controller.lastHitWasBlocked)) {
       if (controller.lastHitWasBlocked) {
         audio.play('yodguard', { volume: 0.85, pitchVariance: 0.04 });
       } else {
@@ -682,7 +845,7 @@ async function main() {
       displayEnemy?.maxStance,
     );
 
-    // 索敵中の敵でBGM分岐: ドラゴン戦闘=ボス曲、その他戦闘=FF風通常曲
+    // 索敵中の敵でBGM分岐: ドラゴン戦闘=ボス曲、その他戦闘=DQ5戦闘曲
     const dragonFighting =
       dragonAI.alive &&
       (dragonAI.state === 'chase' ||
@@ -729,7 +892,7 @@ async function main() {
       bossFelledReturnMusicAt = 0;
       thirdPersonCamera.setLockFocus(null);
       audio.setCombatMusic('explore');
-    } else if (!bossFelledReturnMusicAt) {
+    } else if (!bossFelledReturnMusicAt && !gameOverShown) {
       if (dragonFighting) audio.setCombatMusic('boss');
       else if (normalFighting) audio.setCombatMusic('normal');
       else audio.setCombatMusic('explore');
@@ -745,7 +908,13 @@ async function main() {
     if (controller.state === 'roll' && previousControllerState !== 'roll') {
       audio.playEldenRoll();
     }
+    if (controller.flaskHealSfxPending) {
+      controller.flaskHealSfxPending = false;
+      audio.playFlaskHeal();
+    }
     previousControllerState = controller.state;
+
+    updateHitboxDebug();
 
     // 軽攻撃: 命中タイミングで1回。重攻撃: 踏み込み〜振りのウィンドウ中、剣線分で連続判定
     if (controller.action === 'attack') {
@@ -816,14 +985,14 @@ async function main() {
       lockOn: !!lockTarget,
       hp: Number(controller.hp.toFixed(1)),
       action: controller.action,
-      // enemyは互換用に魔法使い(1体目)を指す。全体はenemiesを参照する
+      // enemyは互換用に野盗を指す。全体はenemiesを参照する
       enemy: {
-        hp: Number(mageAI.hp.toFixed(1)),
-        alive: mageAI.alive,
-        action: mageAI.action,
+        hp: Number(minionAI.hp.toFixed(1)),
+        alive: minionAI.alive,
+        action: minionAI.action,
         position: {
-          x: Number(mageAI.position.x.toFixed(2)),
-          z: Number(mageAI.position.z.toFixed(2)),
+          x: Number(minionAI.position.x.toFixed(2)),
+          z: Number(minionAI.position.z.toFixed(2)),
         },
       },
       enemies: enemies.map((enemy) => ({

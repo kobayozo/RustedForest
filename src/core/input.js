@@ -4,7 +4,9 @@
 const GAMEPAD_DEADZONE = 0.25;
 const GAMEPAD_MOVE_ENTER = 0.28;
 const GAMEPAD_MOVE_EXIT = 0.16;
+const GAMEPAD_BUTTON_A = 0; // A: かがり火休息
 const GAMEPAD_BUTTON_B = 1;
+const GAMEPAD_BUTTON_Y = 3; // Y: 聖杯瓶
 const GAMEPAD_BUTTON_L1 = 4; // LB / L1: 盾構え
 const GAMEPAD_BUTTON_L2 = 6; // LT / L2: キック
 const GAMEPAD_BUTTON_R1 = 5; // RB / R1: 軽攻撃
@@ -117,6 +119,8 @@ export class InputState {
       this._setPadActionKey('Space', !!pad.buttons[GAMEPAD_BUTTON_B]?.pressed); // B: 短押しロール / 押しっぱなしダッシュ
       this._setPadActionKey('KeyQ', !!pad.buttons[GAMEPAD_BUTTON_L1]?.pressed); // L1: 盾構え
       this._setPadActionKey('KeyF', !!pad.buttons[GAMEPAD_BUTTON_R3]?.pressed); // R3: ロックオン
+      this._setPadActionKey('KeyC', !!pad.buttons[GAMEPAD_BUTTON_Y]?.pressed); // Y: 聖杯瓶
+      this._setPadActionKey('KeyT', !!pad.buttons[GAMEPAD_BUTTON_A]?.pressed); // A: かがり火休息
       const r2 = pad.buttons[GAMEPAD_BUTTON_R2];
       const r2Pressed = r2 ? (r2.pressed || r2.value >= GAMEPAD_TRIGGER_THRESHOLD) : false;
       this._setPadActionKey('Mouse2', r2Pressed); // R2: 重攻撃

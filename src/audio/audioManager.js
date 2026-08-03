@@ -9,6 +9,17 @@ export class AudioManager {
     this.bgmGain = null;
     this._bgmSources = new Map(); // name -> { source, gain }
     this._activeBgm = null;
+    // 通常時(探索)BGMの候補。load 後に存在するキーだけ使う
+    this._exploreBgmNames = [
+      'exploreJourney',
+      'exploreFantasy',
+      'exploreArcana',
+      'exploreAdventure',
+      'exploreEternal',
+      'exploreLegend',
+    ];
+    this._lastExploreBgm = null;
+    this._combatMode = null;
   }
 
   init() {
@@ -32,16 +43,30 @@ export class AudioManager {
 
   async load(name, url) {
     const res = await fetch(url);
+    if (!res.ok) throw new Error(`Audio load failed: ${name} (${res.status})`);
     const arrayBuffer = await res.arrayBuffer();
+    // HTMLエラーページなどを誤ってデコードしない
+    const head = new Uint8Array(arrayBuffer, 0, Math.min(16, arrayBuffer.byteLength));
+    const ascii = String.fromCharCode(...head);
+    if (ascii.startsWith('<!') || ascii.startsWith('<html') || ascii.startsWith('<HTML')) {
+      throw new Error(`Audio load got HTML instead of media: ${name}`);
+    }
     const audioBuffer = await this.context.decodeAudioData(arrayBuffer);
     this.buffers.set(name, audioBuffer);
   }
 
   async loadAll(nameToUrl) {
-    await Promise.all(Object.entries(nameToUrl).map(([name, url]) => this.load(name, url)));
+    const results = await Promise.allSettled(
+      Object.entries(nameToUrl).map(([name, url]) => this.load(name, url)),
+    );
+    for (const r of results) {
+      if (r.status === 'rejected') {
+        console.warn('[audio]', r.reason?.message || r.reason);
+      }
+    }
   }
 
-  play(name, { volume = 1, pitchVariance = 0, pitch = 1 } = {}) {
+  play(name, { volume = 1, pitchVariance = 0, pitch = 1, offset = 0, duration = null } = {}) {
     const buffer = this.buffers.get(name);
     if (!buffer || !this.context) return;
 
@@ -52,12 +77,241 @@ export class AudioManager {
     const gain = this.context.createGain();
     gain.gain.value = volume;
     source.connect(gain).connect(this.masterGain);
-    source.start();
+    const startOffset = Math.max(0, Math.min(offset, Math.max(0, buffer.duration - 0.05)));
+    if (duration != null && duration > 0) {
+      source.start(0, startOffset, duration);
+    } else {
+      source.start(0, startOffset);
+    }
   }
 
   playRandom(names, opts) {
     const name = names[Math.floor(Math.random() * names.length)];
     this.play(name, opts);
+  }
+
+  /** 聖杯瓶使用時の回復音（キラキラした高音ベル＋スパークル） */
+  playFlaskHeal({ volume = 0.9 } = {}) {
+    const ctx = this.context;
+    if (!ctx) return;
+    const t0 = ctx.currentTime;
+
+    // 明るい上昇アルペジオ（クリスタル寄り）
+    const tones = [784, 988, 1175, 1568, 1976]; // G5 B5 D6 G6 B6
+    for (let i = 0; i < tones.length; i++) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      const f = tones[i];
+      const start = t0 + i * 0.055;
+      osc.frequency.setValueAtTime(f, start);
+      osc.frequency.exponentialRampToValueAtTime(f * 1.01, start + 0.4);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, start);
+      g.gain.exponentialRampToValueAtTime(volume * (0.2 - i * 0.025), start + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + 0.55);
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = 600;
+      osc.connect(hp).connect(g).connect(this.masterGain);
+      osc.start(start);
+      osc.stop(start + 0.6);
+
+      // 倍音でキラッとさせる短い三角波
+      const shimmer = ctx.createOscillator();
+      shimmer.type = 'triangle';
+      shimmer.frequency.setValueAtTime(f * 2, start);
+      const sg = ctx.createGain();
+      sg.gain.setValueAtTime(0.0001, start);
+      sg.gain.exponentialRampToValueAtTime(volume * 0.08, start + 0.01);
+      sg.gain.exponentialRampToValueAtTime(0.0001, start + 0.22);
+      shimmer.connect(sg).connect(this.masterGain);
+      shimmer.start(start);
+      shimmer.stop(start + 0.25);
+    }
+
+    // スパークル（細かい高域ノイズ粒）
+    const rate = ctx.sampleRate;
+    const sparkDur = 0.55;
+    const n = Math.floor(rate * sparkDur);
+    const buffer = ctx.createBuffer(1, n, rate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < n; i++) {
+      const u = i / n;
+      const env = Math.pow(1 - u, 1.8) * (0.35 + 0.65 * Math.sin(u * Math.PI));
+      // まばらな粒
+      data[i] = Math.random() > 0.86 ? (Math.random() * 2 - 1) * env : 0;
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 5200;
+    bp.Q.value = 0.7;
+    const ng = ctx.createGain();
+    ng.gain.value = volume * 0.55;
+    src.connect(bp).connect(ng).connect(this.masterGain);
+    src.start(t0);
+    src.stop(t0 + sparkDur + 0.02);
+  }
+
+  /** ドラゴンの重厚な地響き */
+  playDragonStomp({ volume = 0.85 } = {}) {
+    const ctx = this.context;
+    if (!ctx) return;
+    const t0 = ctx.currentTime;
+    const dur = 0.55;
+    const rate = ctx.sampleRate;
+    const n = Math.floor(rate * dur);
+    const buffer = ctx.createBuffer(1, n, rate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < n; i++) {
+      const env = Math.pow(1 - i / n, 1.8);
+      data[i] = (Math.random() * 2 - 1) * env;
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 180;
+    lp.Q.value = 0.7;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(volume * 0.9, t0 + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(lp).connect(gain).connect(this.masterGain);
+    src.start(t0);
+    src.stop(t0 + dur + 0.02);
+
+    // 低い正弦で胴体の振動感
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(42, t0);
+    osc.frequency.exponentialRampToValueAtTime(28, t0 + dur);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.0001, t0);
+    og.gain.exponentialRampToValueAtTime(volume * 0.45, t0 + 0.015);
+    og.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(og).connect(this.masterGain);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.02);
+  }
+
+  /** ドラゴンの咆哮（サンプル優先、無ければ合成） */
+  playDragonRoar({ volume = 0.95 } = {}) {
+    if (this.buffers.has('dragonRoar')) {
+      const buf = this.buffers.get('dragonRoar');
+      // 長尺は冒頭〜中盤を切り出し、攻撃タイミングに合わせる
+      const maxStart = Math.max(0, (buf?.duration ?? 2) - 1.8);
+      const offset = Math.random() * Math.min(0.4, maxStart);
+      this.play('dragonRoar', {
+        volume: volume * 0.95,
+        pitchVariance: 0.03,
+        pitch: 0.88 + Math.random() * 0.1,
+        offset,
+        duration: Math.min(2.2, Math.max(1.2, (buf?.duration ?? 2) - offset)),
+      });
+      return;
+    }
+    const ctx = this.context;
+    if (!ctx) return;
+    const t0 = ctx.currentTime;
+    const dur = 1.35;
+    const rate = ctx.sampleRate;
+    const n = Math.floor(rate * dur);
+    const buffer = ctx.createBuffer(1, n, rate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < n; i++) {
+      const u = i / n;
+      const env = u < 0.12 ? u / 0.12 : u > 0.7 ? (1 - u) / 0.3 : 1;
+      data[i] = (Math.random() * 2 - 1) * env;
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 320;
+    bp.Q.value = 0.55;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(volume * 0.7, t0 + 0.08);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(bp).connect(gain).connect(this.masterGain);
+    src.start(t0);
+    src.stop(t0 + dur + 0.02);
+
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(95, t0);
+    osc.frequency.exponentialRampToValueAtTime(55, t0 + dur * 0.85);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.0001, t0);
+    og.gain.exponentialRampToValueAtTime(volume * 0.28, t0 + 0.1);
+    og.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 700;
+    osc.connect(lp).connect(og).connect(this.masterGain);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.02);
+  }
+
+  /** 短い唸り（グルグル。サンプル優先） */
+  playDragonGrowl({ volume = 0.7 } = {}) {
+    if (this.buffers.has('dragonGrowl') || this.buffers.has('dragonSnarl')) {
+      const useSnarl = this.buffers.has('dragonSnarl') && Math.random() < 0.4;
+      if (useSnarl) {
+        this.play('dragonSnarl', { volume: volume * 0.9, pitchVariance: 0.05, pitch: 0.92 });
+        return;
+      }
+      // troll-roars(CC0)は約11秒のパック。頭〜中盤をランダムに短く切って再生
+      const buf = this.buffers.get('dragonGrowl');
+      const maxStart = Math.max(0, (buf?.duration ?? 2) - 1.4);
+      const offset = Math.random() * maxStart;
+      this.play('dragonGrowl', {
+        volume: volume * 0.9,
+        pitchVariance: 0.04,
+        pitch: 0.85 + Math.random() * 0.2,
+        offset,
+        duration: 1.1 + Math.random() * 0.5,
+      });
+      return;
+    }
+    const ctx = this.context;
+    if (!ctx) return;
+    const t0 = ctx.currentTime;
+    const dur = 0.55;
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(70, t0);
+    osc.frequency.exponentialRampToValueAtTime(48, t0 + dur);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 480;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(volume * 0.35, t0 + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(lp).connect(gain).connect(this.masterGain);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.02);
+
+    const rate = ctx.sampleRate;
+    const n = Math.floor(rate * dur);
+    const buffer = ctx.createBuffer(1, n, rate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < n; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 1.5);
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'lowpass';
+    bp.frequency.value = 220;
+    const ng = ctx.createGain();
+    ng.gain.value = volume * 0.4;
+    src.connect(bp).connect(ng).connect(this.masterGain);
+    src.start(t0);
+    src.stop(t0 + dur + 0.02);
   }
 
   // 短く明るいノイズの風切り。knifeSliceより金属感を抑え、さわやかに振る音にする
@@ -438,6 +692,7 @@ export class AudioManager {
     const name = this._activeBgm;
     const old = this._bgmSources.get(name);
     this._activeBgm = null;
+    this._combatMode = null;
     if (!old) return;
     const t0 = this.context.currentTime;
     old.gain.gain.cancelScheduledValues(t0);
@@ -453,11 +708,47 @@ export class AudioManager {
 
   /**
    * mode: 'explore' | 'normal'(通常戦闘/FF風) | 'boss'(ドラゴン専用)
+   * 探索に入るたび壮大な曲からランダム選曲(すでに探索曲再生中なら維持)
    */
   setCombatMusic(mode) {
-    if (mode === 'boss') this.playBgm('bossBgm', { volume: 0.95, fade: 0.9 });
-    else if (mode === 'normal') this.playBgm('battleNormalBgm', { volume: 0.85, fade: 0.9 });
-    else this.playBgm('exploreBgm', { volume: 0.75, fade: 1.4 });
+    if (mode === this._combatMode && mode !== 'explore') return;
+    if (mode === 'boss') {
+      this._combatMode = mode;
+      this.playBgm('bossBgm', { volume: 0.95, fade: 0.9 });
+      return;
+    }
+    if (mode === 'normal') {
+      this._combatMode = mode;
+      this.playBgm('battleNormalBgm', { volume: 0.85, fade: 0.9 });
+      return;
+    }
+    // explore
+    const alreadyExplore =
+      this._combatMode === 'explore' && this._isExploreBgm(this._activeBgm);
+    if (alreadyExplore) return;
+    this._combatMode = 'explore';
+    const name = this._pickExploreBgm();
+    this.playBgm(name, { volume: 0.78, fade: 1.4 });
+  }
+
+  _isExploreBgm(name) {
+    return !!name && this._exploreBgmNames.includes(name);
+  }
+
+  _pickExploreBgm() {
+    const names = this._exploreBgmNames.filter((n) => this.buffers.has(n));
+    if (!names.length) {
+      // フォールバック(旧単曲)
+      return this.buffers.has('exploreBgm') ? 'exploreBgm' : this._exploreBgmNames[0];
+    }
+    let pool = names;
+    if (names.length > 1 && this._lastExploreBgm) {
+      pool = names.filter((n) => n !== this._lastExploreBgm);
+      if (!pool.length) pool = names;
+    }
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    this._lastExploreBgm = pick;
+    return pick;
   }
 
   // ボス撃破ファンファーレ(短い荘厳な和音)
