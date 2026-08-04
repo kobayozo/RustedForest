@@ -18,7 +18,7 @@ import {
 } from './enemy/enemyModel.js';
 import { loadDragonAnimationLibrary, loadDragonMesh, createDragonMixer, DRAGON_CLIP_MAP } from './enemy/dragonModel.js';
 import { loadMageAnimationLibrary, loadMageMesh, createMageMixer, MAGE_CLIP_MAP } from './enemy/mageModel.js';
-import { loadAnimalAnimationLibrary, loadAnimalMesh, createAnimalMixer, ANIMAL_CLIP_MAP } from './enemy/animalModel.js';
+import { loadWildlifeAnimationLibrary, loadWildlifeMesh, createWildlifeMixer, WILDLIFE_CLIP_MAP } from './enemy/wildlifeModel.js';
 import { EnemyAnimator } from './enemy/enemyAnimator.js';
 import { EnemyAI } from './enemy/enemyAI.js';
 import { DragonAI } from './enemy/dragonAI.js';
@@ -120,8 +120,8 @@ async function main() {
       ...animalKeys.map((key) => {
         const preset = ANIMAL_PRESETS[key];
         return Promise.all([
-          loadAnimalMesh(preset.path, preset.height),
-          loadAnimalAnimationLibrary(preset.path),
+          loadWildlifeMesh(preset.path, preset.height),
+          loadWildlifeAnimationLibrary(preset.path, preset.attackClip),
         ]);
       }),
     ]);
@@ -194,14 +194,14 @@ async function main() {
     return enemy;
   }
 
-  // 動物系(Gobkit Free Animal Pack, CC0)。既存の汎用AnimalAI+ソウル系間合いブレインを
-  // そのまま使い回せるので、モデル/クリップだけpreset単位でロードする
+  // 野生動物(Quaternius Ultimate Animated Animal Pack, CC0)。既存の汎用AnimalAI+
+  // ソウル系間合いブレインをそのまま使い回せるので、モデル/クリップだけpreset単位でロードする
   function spawnAnimal(key, spawnPos) {
     const preset = ANIMAL_PRESETS[key];
     const meshScene = animalMeshByKey[key];
     scene.add(meshScene);
-    const mixer = createAnimalMixer(meshScene);
-    const enemyAnimator = new EnemyAnimator(mixer, animalClipLibByKey[key], ANIMAL_CLIP_MAP, {
+    const mixer = createWildlifeMixer(meshScene);
+    const enemyAnimator = new EnemyAnimator(mixer, animalClipLibByKey[key], WILDLIFE_CLIP_MAP, {
       fadeTime: 0.25,
     });
     const enemy = new AnimalAI(meshScene, enemyAnimator, spawnPos, preset);
@@ -237,13 +237,13 @@ async function main() {
   // 野生動物: 城/ドラゴンアリーナ/池から離れた草原各所に配置し、探索中の小規模な
   // 戦闘の起伏を作る(いずれも既存AnimalAIのpresetをそのまま使用)
   const ANIMAL_SPAWN_POS = {
-    rhino: new THREE.Vector3(15, 0, 45),
-    hippo: new THREE.Vector3(-45, 0, -5),
-    bat: new THREE.Vector3(50, 0, 20),
-    redPanda: new THREE.Vector3(-40, 0, 40),
-    corgi: new THREE.Vector3(5, 0, 15),
-    duck: new THREE.Vector3(-15, 0, 24),
-    platypus: new THREE.Vector3(-30, 0, 20),
+    wolf: new THREE.Vector3(15, 0, 45),
+    fox: new THREE.Vector3(-40, 0, 40),
+    husky: new THREE.Vector3(5, 0, 15),
+    bull: new THREE.Vector3(-45, 0, -5),
+    cow: new THREE.Vector3(50, 0, 20),
+    stag: new THREE.Vector3(-15, 0, 24),
+    donkey: new THREE.Vector3(-30, 0, 20),
   };
   const animalAIs = animalKeys.map((key) => {
     const pos = ANIMAL_SPAWN_POS[key] ?? new THREE.Vector3();

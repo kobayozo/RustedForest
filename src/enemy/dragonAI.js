@@ -287,6 +287,7 @@ export class DragonAI {
     this._trackLock = false;
     this._maxKnock = 4.0;
     this._breath = null;
+    this._tailBreathStarted = false;
     this._sfx = null;
     this._stompTimer = 0;
     this._slamStompPlayed = false;
@@ -903,7 +904,8 @@ export class DragonAI {
     } else if (type === 'tailSwipe') {
       // 身体周囲の炎は予備動作(構え)なしにいきなり出ると不自然なので、
       // 咆哮音だけ先に鳴らして溜めを見せ、炎自体はTAIL_IMPACT_Tまで遅らせる
-      // (_updateAttackでt>=TAIL_IMPACT_T到達時に着火する)
+      // (_updateAttackでt>=TAIL_IMPACT_T到達時に着火する。1回限りなので毎回リセット)
+      this._tailBreathStarted = false;
       this._playSfx('roar');
     } else if (type === 'slam') {
       this._playSfx('roar');
@@ -966,8 +968,12 @@ export class DragonAI {
       this._playSfx('stomp');
     }
 
-    if (this.attackType === 'tailSwipe' && !this._breath && t >= TAIL_IMPACT_T) {
+    // !this._breath だけを条件にすると、炎が寿命で消えた直後にt>=TAIL_IMPACT_Tが
+    // まだ真のままなので即座に再着火してしまい、_finishAttackに永久に到達できなくなる
+    // (炎演出が無限ループしてドラゴンが止まって見える不具合)。1回限りのフラグで防ぐ
+    if (this.attackType === 'tailSwipe' && !this._tailBreathStarted && t >= TAIL_IMPACT_T) {
       this._startBreath('radial');
+      this._tailBreathStarted = true;
     }
 
     if (!this._hitApplied) {
