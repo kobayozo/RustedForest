@@ -3,3 +3,8 @@ dist
 tools/out
 .claude
 downloads
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*

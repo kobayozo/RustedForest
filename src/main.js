@@ -298,9 +298,8 @@ async function main() {
     exploreAdventure: '/audio/explore/explore_adventure.mp3',
     exploreEternal: '/audio/explore/explore_eternal.mp3',
     exploreLegend: '/audio/explore/explore_legend.mp3',
-    battleNormalBgm: '/audio/battle_normal.mp3', // DQ5「戦闘のテーマ」(Monsters)
-    bossBgm: '/audio/battle_bgm.mp3', // ドラゴン専用
-    youDied: '/audio/you_died.mp3', // デモンズソウル系 YOU DIED
+    battleNormalBgm: '/audio/battle_normal.mp3', // CC0 orchestral (A Legend Will Rise)
+    bossBgm: '/audio/battle_bgm.mp3', // ドラゴン専用 (Battle Theme A / CC0)
     // ドラゴン鳴き声: OpenGameArt troll-roars (CC0) + Mixkit creature/dino roar
     dragonRoar: '/audio/dragon_roar.mp3',
     dragonGrowl: '/audio/dragon_growl.ogg',
@@ -788,7 +787,7 @@ async function main() {
             gameOverScreen.show();
             gameOverShown = true;
             audio.stopBgm({ fade: 0.4 });
-            audio.play('youDied', { volume: 1.0 });
+            audio.playYouDied({ volume: 1.0 });
           }
         }
       } else {
@@ -845,7 +844,7 @@ async function main() {
       displayEnemy?.maxStance,
     );
 
-    // 索敵中の敵でBGM分岐: ドラゴン戦闘=ボス曲、その他戦闘=DQ5戦闘曲
+    // 索敵中の敵でBGM分岐: ドラゴン戦闘=ボス曲、その他戦闘=通常戦闘曲
     const dragonFighting =
       dragonAI.alive &&
       (dragonAI.state === 'chase' ||

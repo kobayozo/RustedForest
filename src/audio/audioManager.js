@@ -795,4 +795,40 @@ export class AudioManager {
       osc.stop(t0 + 0.55);
     }
   }
+
+  /** 死亡時ジングル（合成。市販ゲーム音源は使わない） */
+  playYouDied({ volume = 1 } = {}) {
+    const ctx = this.context;
+    if (!ctx || !this.masterGain) return;
+    const t0 = ctx.currentTime;
+    const chord = [110, 130.8, 164.8, 196]; // 暗い A minor-ish
+    chord.forEach((f, i) => {
+      const osc = ctx.createOscillator();
+      osc.type = i < 2 ? 'sine' : 'triangle';
+      osc.frequency.setValueAtTime(f, t0);
+      osc.frequency.exponentialRampToValueAtTime(f * 0.92, t0 + 2.2);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(volume * (0.22 - i * 0.03), t0 + 0.15);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 2.4);
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 900;
+      osc.connect(lp).connect(g).connect(this.masterGain);
+      osc.start(t0);
+      osc.stop(t0 + 2.5);
+    });
+    // 低い衝撃
+    const thump = ctx.createOscillator();
+    thump.type = 'sine';
+    thump.frequency.setValueAtTime(55, t0);
+    thump.frequency.exponentialRampToValueAtTime(28, t0 + 0.8);
+    const tg = ctx.createGain();
+    tg.gain.setValueAtTime(0.0001, t0);
+    tg.gain.exponentialRampToValueAtTime(volume * 0.5, t0 + 0.03);
+    tg.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.0);
+    thump.connect(tg).connect(this.masterGain);
+    thump.start(t0);
+    thump.stop(t0 + 1.05);
+  }
 }

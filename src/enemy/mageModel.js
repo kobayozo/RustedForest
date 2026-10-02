@@ -3,8 +3,7 @@ import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { stripRootMotion } from '../utils/animation.js';
 
 // Pro Magic Pack … Mixamo 魔法モーション(idle/walk/詠唱/範囲など)
-// RITUAL+WOMEN+500k.fbx … 調査の結果スケルトン無しの静的メッシュ(Deformer=0)。
-//   自動スキニングは破綻するため public に配置のみ。素体は Mixamo 騎士 + 儀式風マテリアル。
+// 素体は Mixamo 騎士 + 儀式風マテリアル（静的高ポリ Ritual メッシュは公開用から除外）
 
 export const MAGE_CLIP_MAP = {
   idle: 'mage_idle',
@@ -130,9 +129,8 @@ async function buildMage(loader) {
 
   const canonical = collectCanonicalBones(body);
   if (canonical) rebindSkinnedMeshes(body, canonical.boneMap);
-  // RitualWoman.fbx はスケルトン無しのため素体は Mixamo 騎士。儀式風の紫マテリアルを適用。
-  // テクスチャ流用は UV 非互換のため行わない(アセットは public/models/enemy/ritual-mage/ に配置済み)
-  applyWitchMaterials(body, null);
+  // RitualWoman はスケルトン無しのため素体は Mixamo 騎士。儀式風の紫マテリアルを適用。
+  applyWitchMaterials(body);
   scaleModelToHeight(body, TARGET_HEIGHT);
 
   const wrapper = new THREE.Group();
